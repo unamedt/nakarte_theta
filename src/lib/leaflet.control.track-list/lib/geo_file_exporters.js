@@ -2,6 +2,111 @@ import utf8 from 'utf8';
 import escapeHtml from 'escape-html';
 import {saveNktk} from './parsers/nktk';
 
+const GPX_XMLNS_RE = /\sxmlns="http:\/\/www\.topografix\.com\/GPX\/1\/1"/ug;
+
+function stripGpxXmlns(xml) {
+    if (!xml) {
+        return xml;
+    }
+    return xml.replace(GPX_XMLNS_RE, '');
+}
+
+function formatPointAttributes(point) {
+    const attrs = point.meta && point.meta.attributes;
+    if (!attrs) {
+        return '';
+    }
+    const parts = [];
+    for (const [key, value] of Object.entries(attrs)) {
+        parts.push(` ${key}="${escapeHtml(String(value))}"`);
+    }
+    return parts.join('');
+}
+
+function getPointElevation(point, withElevations) {
+    if (withElevations && point.alt !== null && point.alt !== undefined) {
+        return point.alt.toFixed(1);
+    }
+    if (point.ele) {
+        return point.ele;
+    }
+    if (point.alt !== null && point.alt !== undefined) {
+        return point.alt.toFixed(1);
+    }
+    return null;
+}
+
+function getPointTime(point, fallbackTime) {
+    if (point.time) {
+        return point.time;
+    }
+    return fallbackTime;
+}
+
+function getPointExtra(point) {
+    if (!point.meta || !point.meta.extra) {
+        return [];
+    }
+    return point.meta.extra.filter(Boolean).map(stripGpxXmlns);
+}
+
+function formatExtensionsNode(xml) {
+    if (xml.includes('\n')) {
+        return null;
+    }
+    if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+        return null;
+    }
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    const root = doc && doc.documentElement;
+    if (!root || root.nodeName === 'parsererror') {
+        return null;
+    }
+    const tagName = root.localName || root.tagName;
+    if (tagName !== 'extensions') {
+        return null;
+    }
+    const serializer = new XMLSerializer();
+    const serialized = serializer.serializeToString(root);
+    const children = Array.from(root.childNodes)
+        .filter((node) => node.nodeType === 1 || (node.nodeType === 3 && (node.nodeValue || '').trim()));
+    if (!children.length) {
+        return [serialized];
+    }
+    const openMatch = serialized.match(/^<[^>]+>/u);
+    const openTag = openMatch ? openMatch[0] : `<${root.tagName}>`;
+    const closeTag = `</${root.tagName}>`;
+    const lines = [openTag];
+    for (const child of children) {
+        if (child.nodeType === 3) {
+            lines.push(`\t${child.nodeValue.trim()}`);
+        } else {
+            lines.push(`\t${serializer.serializeToString(child)}`);
+        }
+    }
+    lines.push(closeTag);
+    return lines;
+}
+
+function appendExtraNodes(gpx, extraNodes) {
+    for (const extraNode of extraNodes) {
+        const trimmed = extraNode.trim();
+        if (!trimmed) {
+            continue;
+        }
+        const formattedLines = formatExtensionsNode(trimmed);
+        if (formattedLines) {
+            for (const line of formattedLines) {
+                gpx.push(`\t\t\t\t${line}`);
+            }
+            continue;
+        }
+        for (const line of trimmed.split('\n')) {
+            gpx.push(`\t\t\t\t${line}`);
+        }
+    }
+}
+
 function saveGpx(segments, name, points, withElevations = false) {
     const gpx = [];
     const fakeTime = '1970-01-01T00:00:01.000Z';
@@ -42,10 +147,20 @@ function saveGpx(segments, name, points, withElevations = false) {
             for (let point of segment) {
                 let x = point.lng.toFixed(6);
                 let y = point.lat.toFixed(6);
-                const elevation = (withElevations && point.alt !== null)
-                    ? `<ele>${point.alt.toFixed(1)}</ele>` : '';
+                const elevation = getPointElevation(point, withElevations);
+                const time = getPointTime(point, fakeTime);
+                const extra = getPointExtra(point);
+                const attributes = formatPointAttributes(point);
+                gpx.push(`\t\t\t<trkpt lat="${y}" lon="${x}"${attributes}>`);
+                if (elevation !== null) {
+                    gpx.push(`\t\t\t\t<ele>${escapeHtml(String(elevation))}</ele>`);
+                }
                 // time element is not necessary, added for compatibility to Garmin Connect only
-                gpx.push(`\t\t\t<trkpt lat="${y}" lon="${x}">${elevation}<time>${fakeTime}</time></trkpt>`);
+                if (time) {
+                    gpx.push(`\t\t\t\t<time>${escapeHtml(String(time))}</time>`);
+                }
+                appendExtraNodes(gpx, extra);
+                gpx.push('\t\t\t</trkpt>');
             }
             gpx.push('\t\t</trkseg>');
         }
@@ -111,4 +226,3 @@ function saveKml(segments, name, points) {
 }
 
 export {saveGpx, saveGpxWithElevations, saveKml, saveNktk as saveToString};
-

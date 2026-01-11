@@ -34,7 +34,11 @@ function preconnect(url) {
 
 preconnect(config.elevationsServer);
 preconnect(config.CORSProxyUrl);
-preconnect(config.tracksStorageServer);
+if (config.tracksStorage?.serverUrl) {
+    preconnect(config.tracksStorage.serverUrl);
+} else if (config.tracksStorageServer) {
+    preconnect(config.tracksStorageServer);
+}
 
 if (NODE_ENV === 'production') {
     Sentry.init({
@@ -58,4 +62,3 @@ Sentry.configureScope(function(scope) {
 });
 
 App.setUp();
-

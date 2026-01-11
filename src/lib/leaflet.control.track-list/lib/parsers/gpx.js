@@ -5,18 +5,78 @@ import stripBom from '~/lib/stripBom';
 function parseGpx(txt, name, preferNameFromFile) {
     var error;
 
+    function getElementText(element) {
+        const text = xmlGetNodeText(element);
+        return text === null ? null : text.trim();
+    }
+
+    function getChildElements(element) {
+        return Array.prototype.slice.call(element.childNodes)
+            .filter((node) => node.nodeType === 1);
+    }
+
+    function parsePointElement(point_element, serializer) {
+        var lat = parseFloat(point_element.getAttribute('lat'));
+        var lng = parseFloat(point_element.getAttribute('lon'));
+        if (isNaN(lat) || isNaN(lng)) {
+            error = 'CORRUPT';
+            return null;
+        }
+        const point = {lat: lat, lng: lng};
+        const meta = {};
+        const extra = [];
+        const children = getChildElements(point_element);
+        for (const child of children) {
+            if (child.tagName === 'ele') {
+                const eleText = getElementText(child);
+                if (eleText !== null) {
+                    point.ele = eleText;
+                    const eleValue = parseFloat(eleText);
+                    if (!isNaN(eleValue)) {
+                        point.alt = eleValue;
+                    }
+                }
+            } else if (child.tagName === 'time') {
+                const timeText = getElementText(child);
+                if (timeText !== null) {
+                    point.time = timeText;
+                }
+            } else {
+                extra.push(serializer.serializeToString(child));
+            }
+        }
+        if (point_element.attributes && point_element.attributes.length) {
+            const attributes = {};
+            for (const attr of point_element.attributes) {
+                if (attr.name === 'lat' || attr.name === 'lon') {
+                    continue;
+                }
+                attributes[attr.name] = attr.value;
+            }
+            if (Object.keys(attributes).length) {
+                meta.attributes = attributes;
+            }
+        }
+        if (extra.length) {
+            meta.extra = extra;
+        }
+        if (Object.keys(meta).length) {
+            point.meta = meta;
+        }
+        return point;
+    }
+
     function getSegmentPoints(segment_element) {
         var points_elements = segment_element.getElementsByTagName('trkpt');
         var points = [];
+        const serializer = new XMLSerializer();
         for (var i = 0; i < points_elements.length; i++) {
             var point_element = points_elements[i];
-            var lat = parseFloat(point_element.getAttribute('lat'));
-            var lng = parseFloat(point_element.getAttribute('lon'));
-            if (isNaN(lat) || isNaN(lng)) {
-                error = 'CORRUPT';
+            var point = parsePointElement(point_element, serializer);
+            if (!point) {
                 break;
             }
-            points.push({lat: lat, lng: lng});
+            points.push(point);
         }
         return points;
     }
@@ -36,15 +96,14 @@ function parseGpx(txt, name, preferNameFromFile) {
     function getRoutePoints(rte_element) {
         var points_elements = rte_element.getElementsByTagName('rtept');
         var points = [];
+        const serializer = new XMLSerializer();
         for (var i = 0; i < points_elements.length; i++) {
             var point_element = points_elements[i];
-            var lat = parseFloat(point_element.getAttribute('lat'));
-            var lng = parseFloat(point_element.getAttribute('lon'));
-            if (isNaN(lat) || isNaN(lng)) {
-                error = 'CORRUPT';
+            var point = parsePointElement(point_element, serializer);
+            if (!point) {
                 break;
             }
-            points.push({lat: lat, lng: lng});
+            points.push(point);
         }
         return points;
     }

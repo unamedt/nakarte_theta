@@ -1,5 +1,7 @@
 import secrets from './secrets';
 
+const tracksStorageServer = 'https://tracks.nakarte.me';
+
 const config = {
     caption: `
         <a href="https://docs.nakarte.me">Documentation</a> |
@@ -14,7 +16,15 @@ const config = {
     elevationsServer: 'https://elevation.nakarte.me/',
     wikimediaCommonsCoverageUrl: 'https://tiles.nakarte.me/wikimedia_commons_images/{z}/{x}/{y}',
     geocachingSuUrl: 'https://nakarte.me/geocachingSu/geocaching_su2.json',
-    tracksStorageServer: 'https://tracks.nakarte.me',
+    tracksStorageServer,
+    tracksStorage: {
+        serverUrl: tracksStorageServer,
+        enabled: true,
+        nktjInlineMaxLength: 200000,
+        preferServerForLargePayloads: true,
+        saveTimeoutMs: 5000,
+        loadTimeoutMs: 30000,
+    },
     wikimapiaTilesBaseUrl: 'https://proxy.nakarte.me/wikimapia/',
     mapillaryRasterTilesUrl: 'https://mapillary.nakarte.me/{z}/{x}/{y}',
     urlsBypassCORSProxy: [new RegExp('^https://pkk\\.rosreestr\\.ru/', 'u')],

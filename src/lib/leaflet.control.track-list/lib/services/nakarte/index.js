@@ -6,6 +6,14 @@ import loadFromUrl from '../../loadFromUrl';
 import loadTracksFromJson from './loadTracksFromJson';
 import {fetch} from '~/lib/xhr-promise';
 
+function getTracksStorageConfig() {
+    const tracksStorage = config.tracksStorage || {};
+    return {
+        serverUrl: tracksStorage.serverUrl || config.tracksStorageServer,
+        loadTimeoutMs: tracksStorage.loadTimeoutMs ?? 30000,
+    };
+}
+
 function flattenArray(ar) {
     const res = [];
     for (const it of ar) {
@@ -67,10 +75,14 @@ class NakarteUrlLoader {
     }
 
     async loadFromTextEncodedTrackId(values) {
+        const {serverUrl, loadTimeoutMs} = getTracksStorageConfig();
+        if (!serverUrl) {
+            return [{name: 'Track from nakarte server', error: 'NETWORK'}];
+        }
         const requests = values.map((trackId) =>
             fetch(
-                `${config.tracksStorageServer}/track/${trackId}`,
-                {responseType: 'binarystring', withCredentials: true}
+                `${serverUrl}/track/${trackId}`,
+                {responseType: 'binarystring', withCredentials: true, timeout: loadTimeoutMs}
             )
         );
         let responses;
@@ -83,7 +95,35 @@ class NakarteUrlLoader {
     }
 
     async loadFromJSON(values) {
-        return flattenArray(await Promise.all(values.map(loadTracksFromJson)));
+        return flattenArray(await Promise.all(values.map((value) => this.loadFromJSONValue(value))));
+    }
+
+    async loadFromJSONValue(value) {
+        if (value.startsWith('id:')) {
+            const {serverUrl, loadTimeoutMs} = getTracksStorageConfig();
+            const trackId = value.slice(3);
+            if (!trackId) {
+                return [{name: 'Track in url', error: 'CORRUPT'}];
+            }
+            if (!serverUrl) {
+                return [{name: 'Track in url', error: 'CORRUPT'}];
+            }
+            let response;
+            try {
+                response = await fetch(
+                    `${serverUrl}/track/${trackId}`,
+                    {withCredentials: true, timeout: loadTimeoutMs}
+                );
+            } catch (e) {
+                return [{name: 'Track from nakarte server', error: 'NETWORK'}];
+            }
+            const payload = response.responseText || response.response;
+            if (!payload) {
+                return [{name: 'Track in url', error: 'CORRUPT'}];
+            }
+            return loadTracksFromJson(payload);
+        }
+        return loadTracksFromJson(value);
     }
 
     async loadFromUrlencodedUrls(values) {

@@ -23,16 +23,34 @@ import {notify, query} from '~/lib/notifications';
 import {fetch} from '~/lib/xhr-promise';
 import config from '~/config';
 import md5 from 'blueimp-md5';
+import escapeHtml from 'escape-html';
+import utf8 from 'utf8';
+import tzLookup from 'tz-lookup';
 import {wrapLatLngToTarget, wrapLatLngBoundsToTarget} from '~/lib/leaflet.fixes/fixWorldCopyJump';
 import {createZipFile} from '~/lib/zip-writer';
 import {splitLinesAt180Meridian} from "./lib/meridian180";
 import {ElevationProvider} from '~/lib/elevations';
 import {parseNktkSequence} from './lib/parsers/nktk';
+import * as urlSafeBase64 from './lib/parsers/urlSafeBase64';
+import loadTracksFromJson from './lib/services/nakarte/loadTracksFromJson';
 import * as coordFormats from '~/lib/leaflet.control.coordinates/formats';
 import {polygonArea} from '~/lib/polygon-area';
 import {polylineHasSelfIntersections} from '~/lib/polyline-selfintersects';
+import {cloneLatLngWithMeta, toLatLngWithMeta} from '~/lib/leaflet.latlng-meta';
 
 const TRACKLIST_TRACK_COLORS = ['#77f', '#f95', '#0ff', '#f77', '#f7f', '#ee5'];
+
+function getTracksStorageConfig() {
+    const tracksStorage = config.tracksStorage || {};
+    return {
+        serverUrl: tracksStorage.serverUrl || config.tracksStorageServer,
+        enabled: tracksStorage.enabled !== false,
+        nktjInlineMaxLength: tracksStorage.nktjInlineMaxLength ?? 200000,
+        preferServerForLargePayloads: tracksStorage.preferServerForLargePayloads !== false,
+        saveTimeoutMs: tracksStorage.saveTimeoutMs ?? 5000,
+        loadTimeoutMs: tracksStorage.loadTimeoutMs ?? 30000,
+    };
+}
 
 const TrackSegment = L.MeasuredLine.extend({
     includes: L.Polyline.EditMixin,
@@ -608,6 +626,21 @@ L.Control.TrackList = L.Control.extend({
                 {text: 'Duplicate', callback: this.duplicateTrack.bind(this, track)},
                 {text: 'Reverse', callback: this.reverseTrack.bind(this, track)},
                 {text: 'Show elevation profile', callback: this.showElevationProfileForTrack.bind(this, track)},
+                () => {
+                    const checked = track.showExtendedTrackpointMeta();
+                    const box = checked ? '[x]' : '[ ]';
+                    return {
+                        text: `${box} show extended trackpoint meta`,
+                        callback: () => track.showExtendedTrackpointMeta(!checked),
+                    };
+                },
+                () => {
+                    const sizeText = this.formatSizeKb(this.getTrackSerializedSize(track));
+                    return {
+                        text: `clear track metadata. size: ${sizeText} kB`,
+                        callback: this.showTrackMetaCleanupMenu.bind(this, track),
+                    };
+                },
                 '-',
                 {text: 'Delete', callback: this.removeTrack.bind(this, track)},
                 '-',
@@ -637,7 +670,7 @@ L.Control.TrackList = L.Control.extend({
 
         duplicateTrack: function(track) {
             const segments = this.getTrackPolylines(track).map((line) =>
-                line.getLatLngs().map((latlng) => [latlng.lat, latlng.lng])
+                line.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng))
             );
             const points = this.getTrackPoints(track)
                 .map((point) => ({lat: point.latlng.lat, lng: point.latlng.lng, name: point.label}));
@@ -646,12 +679,7 @@ L.Control.TrackList = L.Control.extend({
 
         reverseTrackSegment: function(trackSegment) {
             trackSegment.stopDrawingLine();
-            var latlngs = trackSegment.getLatLngs();
-            latlngs = latlngs.map(function(ll) {
-                    return [ll.lat, ll.lng];
-                }
-            );
-            latlngs.reverse();
+            var latlngs = trackSegment.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng)).reverse();
             var isEdited = (this._editedLine === trackSegment);
             this.deleteTrackSegment(trackSegment);
             var newTrackSegment = this.addTrackSegment(trackSegment._parentTrack, latlngs);
@@ -672,6 +700,637 @@ L.Control.TrackList = L.Control.extend({
             return tracks.map((track) => this.trackToString(track)).join('/');
         },
 
+        serializeTracksForHash: function(tracks) {
+            if (!tracks.length) {
+                return null;
+            }
+            const tracksStorage = getTracksStorageConfig();
+            const useServer = tracksStorage.enabled && tracksStorage.serverUrl;
+            if (!this.tracksHavePointMeta(tracks)) {
+                const payload = this.serializeTracks(tracks);
+                if (!useServer) {
+                    return {paramName: 'nktk', payload};
+                }
+                return {paramName: 'nktl', payload};
+            }
+            const jsonPayload = this.serializeTracksToJson(tracks);
+            if (!jsonPayload.length) {
+                const payload = this.serializeTracks(tracks);
+                if (!useServer) {
+                    return {paramName: 'nktk', payload};
+                }
+                return {paramName: 'nktl', payload};
+            }
+            let jsonString = JSON.stringify(jsonPayload);
+            jsonString = utf8.encode(jsonString);
+            return {paramName: 'nktj', payload: urlSafeBase64.encode(jsonString)};
+        },
+
+        serializeTracksForSession: function(tracks) {
+            const serialized = this.serializeTracksForHash(tracks);
+            if (!serialized) {
+                return null;
+            }
+            if (serialized.paramName === 'nktj') {
+                return {format: 'nktj', data: serialized.payload};
+            }
+            return {format: 'nktk', data: serialized.payload};
+        },
+
+        loadTracksFromSession: async function(sessionTracks, allowEmpty = false) {
+            if (!sessionTracks) {
+                return;
+            }
+            if (typeof sessionTracks === 'string') {
+                this.loadTracksFromString(sessionTracks, allowEmpty);
+                return;
+            }
+            if (sessionTracks.format === 'nktj' && sessionTracks.data) {
+                const geodata = await loadTracksFromJson(sessionTracks.data);
+                this.addTracksFromGeodataArray(geodata, allowEmpty);
+                return;
+            }
+            if (sessionTracks.format === 'nktk' && sessionTracks.data) {
+                this.loadTracksFromString(sessionTracks.data, allowEmpty);
+            }
+        },
+
+        tracksHavePointMeta: function(tracks) {
+            for (const track of tracks) {
+                if (this.trackHasPointMeta(track)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        trackHasPointMeta: function(track) {
+            const segments = this.getTrackPolylines(track);
+            for (const segment of segments) {
+                const latlngs = segment.getFixedLatLngs();
+                for (const latlng of latlngs) {
+                    const hasAlt = latlng.alt !== undefined && latlng.alt !== null;
+                    const hasMeta =
+                        latlng.meta &&
+                        ((latlng.meta.attributes && Object.keys(latlng.meta.attributes).length) ||
+                            (Array.isArray(latlng.meta.extra) && latlng.meta.extra.length));
+                    if (latlng.time || latlng.ele || hasAlt || hasMeta) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        },
+
+        serializeTracksToJson: function(tracks) {
+            const payload = [];
+            for (const track of tracks) {
+                const entry = {n: track.name()};
+                const segments = [];
+                for (const segment of this.getTrackPolylines(track)) {
+                    const latlngs = segment.getFixedLatLngs();
+                    if (!latlngs.length) {
+                        continue;
+                    }
+                    segments.push(latlngs.map(this.serializeTrackPointForJson.bind(this)));
+                }
+                if (segments.length) {
+                    entry.t = segments;
+                }
+                const points = this.getTrackPoints(track).map((point) => ({
+                    n: point.label,
+                    lt: point.latlng.lat,
+                    ln: point.latlng.lng,
+                }));
+                if (points.length) {
+                    entry.p = points;
+                }
+                entry.c = track.color();
+                entry.v = track.visible();
+                entry.m = track.measureTicksShown();
+                if (entry.t || entry.p) {
+                    payload.push(entry);
+                }
+            }
+            return payload;
+        },
+
+        serializeTrackPointForJson: function(latlng) {
+            const point = {lt: latlng.lat, ln: latlng.lng};
+            if (latlng.alt !== undefined && latlng.alt !== null) {
+                point.al = latlng.alt;
+            }
+            if (latlng.ele !== undefined && latlng.ele !== null && latlng.ele !== '') {
+                point.el = latlng.ele;
+            }
+            if (latlng.time !== undefined && latlng.time !== null && latlng.time !== '') {
+                point.t = latlng.time;
+            }
+            if (latlng.meta) {
+                const meta = {};
+                if (latlng.meta.attributes && Object.keys(latlng.meta.attributes).length) {
+                    meta.a = latlng.meta.attributes;
+                }
+                if (Array.isArray(latlng.meta.extra) && latlng.meta.extra.length) {
+                    meta.x = latlng.meta.extra;
+                }
+                if (Object.keys(meta).length) {
+                    point.m = meta;
+                }
+            }
+            return point;
+        },
+
+        getTrackJsonEntry: function(track) {
+            const payload = this.serializeTracksToJson([track]);
+            if (!payload.length) {
+                return null;
+            }
+            return payload[0];
+        },
+
+        getTrackJsonEncodedLength: function(entry) {
+            if (!entry) {
+                return 0;
+            }
+            let jsonString = JSON.stringify([entry]);
+            jsonString = utf8.encode(jsonString);
+            return urlSafeBase64.encode(jsonString).length;
+        },
+
+        getTrackSerializedSize: function(track) {
+            return this.getTrackJsonEncodedLength(this.getTrackJsonEntry(track));
+        },
+
+        formatSizeKb: function(bytes) {
+            if (!Number.isFinite(bytes) || bytes <= 0) {
+                return '0';
+            }
+            const kb = bytes / 1024;
+            if (kb < 0.1) {
+                return '0.1';
+            }
+            if (kb < 10) {
+                return kb.toFixed(1);
+            }
+            return String(Math.round(kb));
+        },
+
+        buildMetaTagSelection: function(tagIds) {
+            const selection = {
+                time: false,
+                ele: false,
+                alt: false,
+                attrs: new Set(),
+                extras: new Set(),
+            };
+            for (const tagId of tagIds) {
+                if (tagId === 'time') {
+                    selection.time = true;
+                } else if (tagId === 'ele') {
+                    selection.ele = true;
+                } else if (tagId === 'alt') {
+                    selection.alt = true;
+                } else if (tagId.startsWith('attr:')) {
+                    selection.attrs.add(tagId.slice(5));
+                } else if (tagId.startsWith('extra:')) {
+                    selection.extras.add(tagId.slice(6));
+                }
+            }
+            return selection;
+        },
+
+        filterExtraMetaArray: function(extraArray, extrasToRemove) {
+            if (!Array.isArray(extraArray) || !extraArray.length || !extrasToRemove.size) {
+                return {values: extraArray, changed: false};
+            }
+            if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+                return {values: extraArray, changed: false};
+            }
+            const result = [];
+            let changed = false;
+            for (const extra of extraArray) {
+                const filtered = this.filterExtraMetaXml(extra, extrasToRemove);
+                if (filtered.changed) {
+                    changed = true;
+                }
+                result.push(...filtered.values);
+            }
+            if (!changed) {
+                return {values: extraArray, changed: false};
+            }
+            return {values: result, changed: true};
+        },
+
+        filterExtraMetaXml: function(extra, extrasToRemove) {
+            const xml = String(extra || '').trim();
+            if (!xml) {
+                return {values: [], changed: Boolean(extra)};
+            }
+            if (!extrasToRemove.size || typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+                return {values: [xml], changed: false};
+            }
+            const doc = new DOMParser().parseFromString(`<root>${xml}</root>`, 'text/xml');
+            if (!doc || !doc.documentElement || doc.documentElement.nodeName === 'parsererror') {
+                return {values: [xml], changed: false};
+            }
+            const serializer = new XMLSerializer();
+            const state = {changed: false};
+            const values = [];
+            for (const child of Array.from(doc.documentElement.children)) {
+                if (this.filterExtraMetaElement(child, '', extrasToRemove, state)) {
+                    values.push(serializer.serializeToString(child));
+                } else {
+                    state.changed = true;
+                }
+            }
+            if (!state.changed) {
+                return {values: [xml], changed: false};
+            }
+            return {values, changed: true};
+        },
+
+        filterExtraMetaElement: function(element, prefix, extrasToRemove, state) {
+            this.stripWhitespaceTextNodes(element);
+            const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
+            if (extrasToRemove.has(name)) {
+                state.changed = true;
+                return false;
+            }
+            const children = Array.from(element.children);
+            for (const child of children) {
+                if (!this.filterExtraMetaElement(child, name, extrasToRemove, state)) {
+                    element.removeChild(child);
+                    state.changed = true;
+                }
+            }
+            if (!element.children.length) {
+                const value = (element.textContent || '').trim();
+                if (!value) {
+                    state.changed = true;
+                    return false;
+                }
+            }
+            return true;
+        },
+
+        stripTagsFromLatLng: function(latlng, selection) {
+            if (selection.time) {
+                delete latlng.time;
+            }
+            if (selection.ele) {
+                delete latlng.ele;
+            }
+            if (selection.alt) {
+                delete latlng.alt;
+            }
+            if (latlng.meta && (selection.attrs.size || selection.extras.size)) {
+                if (selection.attrs.size && latlng.meta.attributes) {
+                    for (const name of selection.attrs) {
+                        if (name in latlng.meta.attributes) {
+                            delete latlng.meta.attributes[name];
+                        }
+                    }
+                    if (!Object.keys(latlng.meta.attributes).length) {
+                        delete latlng.meta.attributes;
+                    }
+                }
+                if (selection.extras.size && latlng.meta.extra) {
+                    const filtered = this.filterExtraMetaArray(latlng.meta.extra, selection.extras);
+                    if (filtered.changed) {
+                        if (filtered.values.length) {
+                            latlng.meta.extra = filtered.values;
+                        } else {
+                            delete latlng.meta.extra;
+                        }
+                    }
+                }
+                if (!latlng.meta.attributes && !latlng.meta.extra) {
+                    delete latlng.meta;
+                }
+            }
+        },
+
+        getUtf8Length: function(value) {
+            if (value === null || value === undefined) {
+                return 0;
+            }
+            const text = String(value);
+            if (!text.length) {
+                return 0;
+            }
+            return utf8.encode(text).length;
+        },
+
+        addMetaValueStat: function(map, name, value, allowEmpty = false) {
+            if (value === null || value === undefined) {
+                return;
+            }
+            const text = String(value);
+            if (!allowEmpty && text === '') {
+                return;
+            }
+            const valueLength = this.getUtf8Length(text);
+            let stat = map.get(name);
+            if (!stat) {
+                stat = {count: 0, valueLength: 0};
+                map.set(name, stat);
+            }
+            stat.count += 1;
+            stat.valueLength += valueLength;
+        },
+
+        estimateJsonTagSize: function(tagName, count, valueLength, valueIsString) {
+            if (!count) {
+                return 0;
+            }
+            const nameLength = this.getUtf8Length(tagName);
+            const overhead = valueIsString ? 6 : 4;
+            return count * (nameLength + overhead) + valueLength;
+        },
+
+        estimateXmlTagSize: function(tagName, count, valueLength) {
+            if (!count) {
+                return 0;
+            }
+            const segments = String(tagName).split('/');
+            let nameLength = 0;
+            for (const segment of segments) {
+                nameLength += this.getUtf8Length(segment);
+            }
+            const overhead = segments.length * 5;
+            return count * (nameLength * 2 + overhead) + valueLength;
+        },
+
+        collectTrackMetaValueStats: function(track) {
+            const stats = {
+                time: {count: 0, valueLength: 0},
+                ele: {count: 0, valueLength: 0},
+                alt: {count: 0, valueLength: 0},
+                attributes: new Map(),
+                extras: new Map(),
+            };
+            for (const segment of this.getTrackPolylines(track)) {
+                const latlngs = segment.getFixedLatLngs();
+                for (const latlng of latlngs) {
+                    if (latlng.time !== undefined && latlng.time !== null && latlng.time !== '') {
+                        stats.time.count += 1;
+                        stats.time.valueLength += this.getUtf8Length(latlng.time);
+                    }
+                    if (latlng.ele !== undefined && latlng.ele !== null && latlng.ele !== '') {
+                        stats.ele.count += 1;
+                        stats.ele.valueLength += this.getUtf8Length(latlng.ele);
+                    }
+                    if (latlng.alt !== undefined && latlng.alt !== null) {
+                        stats.alt.count += 1;
+                        stats.alt.valueLength += this.getUtf8Length(latlng.alt);
+                    }
+                    if (latlng.meta && latlng.meta.attributes) {
+                        for (const [name, value] of Object.entries(latlng.meta.attributes)) {
+                            this.addMetaValueStat(stats.attributes, name, value, true);
+                        }
+                    }
+                    if (latlng.meta && Array.isArray(latlng.meta.extra)) {
+                        this.collectExtendedMetaStats(latlng, stats.extras);
+                    }
+                }
+            }
+            return stats;
+        },
+
+        collectExtendedMetaStats: function(point, extraStats) {
+            if (!point || !point.meta || !Array.isArray(point.meta.extra)) {
+                return;
+            }
+            if (typeof DOMParser === 'undefined') {
+                return;
+            }
+            for (const extraNode of point.meta.extra) {
+                const xml = String(extraNode || '').trim();
+                if (!xml) {
+                    continue;
+                }
+                const doc = new DOMParser().parseFromString(`<root>${xml}</root>`, 'text/xml');
+                if (!doc || !doc.documentElement || doc.documentElement.nodeName === 'parsererror') {
+                    continue;
+                }
+                for (const child of doc.documentElement.children) {
+                    this.collectExtendedMetaStatsFromElement(child, '', extraStats);
+                }
+            }
+        },
+
+        collectExtendedMetaStatsFromElement: function(element, prefix, extraStats) {
+            const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
+            const children = Array.from(element.children);
+            if (!children.length) {
+                const value = (element.textContent || '').trim();
+                if (value) {
+                    this.addMetaValueStat(extraStats, name, value);
+                }
+                return;
+            }
+            if (element.tagName === 'extensions') {
+                for (const child of children) {
+                    this.collectExtendedMetaStatsFromElement(child, name, extraStats);
+                }
+                return;
+            }
+            const value = (element.textContent || '').trim();
+            if (value) {
+                this.addMetaValueStat(extraStats, name, value);
+            }
+            for (const child of children) {
+                this.collectExtendedMetaStatsFromElement(child, name, extraStats);
+            }
+        },
+
+        stripWhitespaceTextNodes: function(element) {
+            const nodes = Array.from(element.childNodes);
+            for (const node of nodes) {
+                if (node.nodeType === 3 && !(node.nodeValue || '').trim()) {
+                    element.removeChild(node);
+                }
+            }
+        },
+
+        getTrackMetaTagStats: function(track) {
+            const stats = this.collectTrackMetaValueStats(track);
+            const tags = [];
+            if (stats.time.count) {
+                tags.push({
+                    id: 'time',
+                    label: 'time',
+                    sizeBytes: this.estimateJsonTagSize('t', stats.time.count, stats.time.valueLength, true),
+                });
+            }
+            if (stats.ele.count) {
+                tags.push({
+                    id: 'ele',
+                    label: 'ele',
+                    sizeBytes: this.estimateJsonTagSize('el', stats.ele.count, stats.ele.valueLength, true),
+                });
+            }
+            if (stats.alt.count) {
+                tags.push({
+                    id: 'alt',
+                    label: 'alt',
+                    sizeBytes: this.estimateJsonTagSize('al', stats.alt.count, stats.alt.valueLength, false),
+                });
+            }
+            const attributeTags = Array.from(stats.attributes.entries())
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([name, stat]) => ({
+                    id: `attr:${name}`,
+                    label: `@${name}`,
+                    sizeBytes: this.estimateJsonTagSize(name, stat.count, stat.valueLength, true),
+                }));
+            tags.push(...attributeTags);
+            const extraTags = Array.from(stats.extras.entries())
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([name, stat]) => ({
+                    id: `extra:${name}`,
+                    label: `<${name}>`,
+                    sizeBytes: this.estimateXmlTagSize(name, stat.count, stat.valueLength),
+                }));
+            tags.push(...extraTags);
+            return {baseSize: 0, tags};
+        },
+
+        getTrackMetaCleanupSelection: function(track) {
+            if (!track._metaCleanupSelection) {
+                track._metaCleanupSelection = new Set();
+            }
+            return track._metaCleanupSelection;
+        },
+
+        getTrackMetaCleanupStats: function(track, reuseCached = false) {
+            if (!reuseCached || !track._metaCleanupStats) {
+                track._metaCleanupStats = this.getTrackMetaTagStats(track);
+            }
+            return track._metaCleanupStats;
+        },
+
+        showTrackMetaCleanupMenu: function(track, e, keepPosition = false) {
+            const menuPosition = this.resolveMetaCleanupMenuPosition(track, e, keepPosition);
+            const selection = this.getTrackMetaCleanupSelection(track);
+            const metaStats = this.getTrackMetaCleanupStats(track, keepPosition);
+            const tagIds = new Set(metaStats.tags.map((tag) => tag.id));
+            for (const tagId of Array.from(selection)) {
+                if (!tagIds.has(tagId)) {
+                    selection.delete(tagId);
+                }
+            }
+            if (!track._metaCleanupSelectionInitialized && metaStats.tags.length) {
+                selection.clear();
+                for (const tag of metaStats.tags) {
+                    if (tag.id !== 'time' && tag.id !== 'ele') {
+                        selection.add(tag.id);
+                    }
+                }
+                track._metaCleanupSelectionInitialized = true;
+            }
+            const items = [
+                () => ({text: `${track.name()}`, header: true}),
+                '-',
+            ];
+            if (metaStats.tags.length === 0) {
+                items.push({text: 'No trackpoint meta tags', disabled: true});
+            } else {
+                for (const tag of metaStats.tags) {
+                    const checked = selection.has(tag.id);
+                    const sizeText = this.formatSizeKb(tag.sizeBytes);
+                    const label = escapeHtml(tag.label);
+                    const checkedAttr = checked ? ' checked="checked"' : '';
+                    items.push({
+                        text: `<label class="meta-cleanup-label">` +
+                            `<input type="checkbox" class="leaflet-control-layers-selector"${checkedAttr}>` +
+                            `<span>${label} (${sizeText} kb)</span></label>`,
+                        callback: (event) => {
+                            if (checked) {
+                                selection.delete(tag.id);
+                            } else {
+                                selection.add(tag.id);
+                            }
+                            this.showTrackMetaCleanupMenu(track, event, true);
+                        },
+                    });
+                }
+            }
+            items.push('-');
+            items.push({
+                text: 'Delete',
+                disabled: selection.size === 0,
+                callback: () => {
+                    const tagIdsToDelete = new Set(selection);
+                    selection.clear();
+                    this.deleteTrackMetaTags(track, tagIdsToDelete);
+                },
+            });
+            new Contextmenu(items).show(this.createContextmenuEvent(menuPosition));
+        },
+
+        deleteTrackMetaTags: function(track, tagIds) {
+            if (!tagIds || !tagIds.size) {
+                return;
+            }
+            const selection = this.buildMetaTagSelection(tagIds);
+            for (const segment of this.getTrackPolylines(track)) {
+                const latlngs = segment.getFixedLatLngs();
+                for (const latlng of latlngs) {
+                    this.stripTagsFromLatLng(latlng, selection);
+                }
+            }
+            this.notifyTracksChanged();
+        },
+
+        resolveMetaCleanupMenuPosition: function(track, e, keepPosition) {
+            const position = keepPosition ? null : this.extractMenuPositionFromEvent(e);
+            if (position) {
+                track._metaCleanupMenuPosition = position;
+            }
+            if (track._metaCleanupMenuPosition) {
+                return track._metaCleanupMenuPosition;
+            }
+            return {x: window.innerWidth / 2, y: window.innerHeight / 2};
+        },
+
+        extractMenuPositionFromEvent: function(e) {
+            const event = e && e.originalEvent ? e.originalEvent : e;
+            const candidate = this.readMenuPositionFromEvent(event || e);
+            if (candidate) {
+                return candidate;
+            }
+            const target = (e && (e.currentTarget || e.target)) || null;
+            if (target && target.getBoundingClientRect) {
+                const rect = target.getBoundingClientRect();
+                return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+            }
+            return null;
+        },
+
+        readMenuPositionFromEvent: function(event) {
+            if (!event) {
+                return null;
+            }
+            const {clientX, clientY} = event;
+            if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+                return null;
+            }
+            return {x: clientX, y: clientY};
+        },
+
+        createContextmenuEvent: function(position) {
+            return {
+                clientX: position.x,
+                clientY: position.y,
+                preventDefault: function() {
+                    return false;
+                },
+                defaultPrevented: false,
+            };
+        },
+
         copyTracksLinkToClipboard: function(tracks, mouseEvent, allowWithoutTracks = false) {
             if (!tracks.length) {
                 if (allowWithoutTracks) {
@@ -682,15 +1341,72 @@ L.Control.TrackList = L.Control.extend({
                 notify('No tracks to copy');
                 return;
             }
-            let serialized = this.serializeTracks(tracks);
-            const hashDigest = md5(serialized, null, true);
+            const serialized = this.serializeTracksForHash(tracks);
+            if (!serialized) {
+                notify('No tracks to copy');
+                return;
+            }
+            const tracksStorage = getTracksStorageConfig();
+            const canUseServer = tracksStorage.enabled && tracksStorage.serverUrl;
+            if (serialized.paramName === 'nktj') {
+                const shouldTryServer =
+                    canUseServer &&
+                    tracksStorage.preferServerForLargePayloads &&
+                    serialized.payload.length > tracksStorage.nktjInlineMaxLength;
+                if (!shouldTryServer) {
+                    const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktj: serialized.payload});
+                    copyToClipboard(url, mouseEvent);
+                    return;
+                }
+                const hashDigest = md5(serialized.payload, null, true);
+                const key = btoa(hashDigest).replace(/\//ug, '_').replace(/\+/ug, '-').replace(/=/ug, '');
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktj: `id:${key}`});
+                fetch(`${tracksStorage.serverUrl}/track/${key}`, {
+                    method: 'POST',
+                    data: serialized.payload,
+                    withCredentials: true,
+                    timeout: tracksStorage.saveTimeoutMs,
+                    maxTries: 1
+                }).then(
+                    () => {
+                        copyToClipboard(url, mouseEvent);
+                    },
+                    (e) => {
+                        let message = e.message || e;
+                        if (e.xhr?.status === 413) {
+                            message = 'track is too big';
+                        }
+                        logging.captureMessage('Failed to save track to server',
+                            {status: e.xhr?.status, response: e.xhr?.responseText});
+                        notify(`Tracks server is unavailable, using long link (${message})`);
+                        const fallbackUrl = getLinkToShare(
+                            this.options.keysToExcludeOnCopyLink,
+                            {nktj: serialized.payload}
+                        );
+                        copyToClipboard(fallbackUrl, mouseEvent);
+                    }
+                );
+                return;
+            }
+            if (serialized.paramName === 'nktk') {
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktk: serialized.payload});
+                copyToClipboard(url, mouseEvent);
+                return;
+            }
+            if (!canUseServer) {
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktk: serialized.payload});
+                copyToClipboard(url, mouseEvent);
+                return;
+            }
+            const hashDigest = md5(serialized.payload, null, true);
             const key = btoa(hashDigest).replace(/\//ug, '_').replace(/\+/ug, '-').replace(/=/ug, '');
             const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktl: key});
             copyToClipboard(url, mouseEvent);
-            fetch(`${config.tracksStorageServer}/track/${key}`, {
+            fetch(`${tracksStorage.serverUrl}/track/${key}`, {
                 method: 'POST',
-                data: serialized,
-                withCredentials: true
+                data: serialized.payload,
+                withCredentials: true,
+                timeout: tracksStorage.saveTimeoutMs
             }).then(
                 null, (e) => {
                     let message = e.message || e;
@@ -915,8 +1631,8 @@ L.Control.TrackList = L.Control.extend({
         joinTrackSegments: function(newSegment, joinToStart) {
             this.hideLineCursor();
             var originalSegment = this._editedLine;
-            var latlngs = originalSegment.getLatLngs(),
-                latngs2 = newSegment.getLatLngs();
+            var latlngs = originalSegment.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng)),
+                latngs2 = newSegment.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng));
             if (joinToStart === this._lineJoinFromStart) {
                 latngs2.reverse();
             }
@@ -925,10 +1641,6 @@ L.Control.TrackList = L.Control.extend({
             } else {
                 latlngs.push(...latngs2);
             }
-            latlngs = latlngs.map(function(ll) {
-                    return [ll.lat, ll.lng];
-                }
-            );
             this.deleteTrackSegment(originalSegment);
             if (originalSegment._parentTrack === newSegment._parentTrack) {
                 this.deleteTrackSegment(newSegment);
@@ -985,17 +1697,338 @@ L.Control.TrackList = L.Control.extend({
             if (!segmentArea) {
                 segmentArea = this.formatArea(polygonArea(points));
             }
+            const metadataBlock = this.formatSegmentPointMetadata(segment);
             return `
                 <b>${track.name()}</b><br>
                 <br>
                 Segment number: ${segmentOrdinalNumber} / ${trackSegmentsCount}<br>
                 Segment length: ${this.formatLength(segment.getLength())}<br>
                 Segment area: ${segmentArea}
+                ${metadataBlock}
             `;
         },
 
+        formatSegmentPointMetadata: function(segment) {
+            const track = segment._parentTrack;
+            const nearestInfo = this.getNearestPointInfo(segment);
+            if (!nearestInfo) {
+                return `
+                    <br>
+                    <br>
+                    Nearest point:<br>
+                    Distance from start: n/a<br>
+                    Time: n/a<br>
+                    Elevation: n/a<br>
+                    Speed: n/a
+                `;
+            }
+            const {points, point, index, distanceFromStart} = nearestInfo;
+            const timeText = this.formatPointTime(point, track);
+            const elevationText = this.formatPointElevation(point);
+            const speedText = this.formatPointSpeed(points, index);
+            const extendedMeta = this.formatSegmentPointExtendedMeta(point, track);
+            return `
+                <br>
+                <br>
+                Nearest point:<br>
+                Distance from start: ${this.formatLength(distanceFromStart)}<br>
+                Time: ${timeText}<br>
+                Elevation: ${elevationText}<br>
+                Speed: ${speedText}
+                ${extendedMeta}
+            `;
+        },
+
+        formatSegmentPointExtendedMeta: function(point, track) {
+            if (!track.showExtendedTrackpointMeta || !track.showExtendedTrackpointMeta()) {
+                return '';
+            }
+            const entries = this.collectExtendedMetaEntries(point);
+            if (!entries.length) {
+                return `
+                    <br>
+                    <br>
+                    Extended trackpoint meta:<br>
+                    n/a
+                `;
+            }
+            const lines = entries.map(({name, value}) => {
+                const safeName = escapeHtml(String(name));
+                const safeValue = escapeHtml(String(value));
+                return `${safeName}: ${safeValue}`;
+            }).join('<br>');
+            return `
+                <br>
+                <br>
+                Extended trackpoint meta:<br>
+                ${lines}
+            `;
+        },
+
+        collectExtendedMetaEntries: function(point) {
+            if (!point || !point.meta || !Array.isArray(point.meta.extra)) {
+                return [];
+            }
+            if (typeof DOMParser === 'undefined') {
+                return [];
+            }
+            const entries = [];
+            for (const extraNode of point.meta.extra) {
+                const xml = String(extraNode || '').trim();
+                if (!xml) {
+                    continue;
+                }
+                const doc = new DOMParser().parseFromString(`<root>${xml}</root>`, 'text/xml');
+                if (!doc || !doc.documentElement || doc.documentElement.nodeName === 'parsererror') {
+                    continue;
+                }
+                for (const child of doc.documentElement.children) {
+                    this.collectExtendedMetaFromElement(child, '', entries);
+                }
+            }
+            return entries;
+        },
+
+        collectExtendedMetaFromElement: function(element, prefix, entries) {
+            const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
+            const children = Array.from(element.children);
+            if (!children.length) {
+                const value = (element.textContent || '').trim();
+                if (value) {
+                    entries.push({name, value});
+                }
+                return;
+            }
+            if (element.tagName === 'extensions') {
+                for (const child of children) {
+                    this.collectExtendedMetaFromElement(child, name, entries);
+                }
+                return;
+            }
+            const value = (element.textContent || '').trim();
+            if (value) {
+                entries.push({name, value});
+            }
+            for (const child of children) {
+                this.collectExtendedMetaFromElement(child, name, entries);
+            }
+        },
+
+        getNearestPointInfo: function(segment) {
+            const points = segment.getFixedLatLngs();
+            if (!points.length) {
+                return null;
+            }
+            const target = segment._lastMouseLatLng || points[0];
+            const index = this.getNearestPointIndex(points, target);
+            return {
+                points,
+                index,
+                point: points[index],
+                distanceFromStart: this.getDistanceFromStart(points, index),
+            };
+        },
+
+        getNearestPointIndex: function(points, target) {
+            let nearestIndex = 0;
+            let minDist = Infinity;
+            for (let i = 0; i < points.length; i++) {
+                const dist = target.distanceTo(points[i]);
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearestIndex = i;
+                }
+            }
+            return nearestIndex;
+        },
+
+        getDistanceFromStart: function(points, index) {
+            let distance = 0;
+            for (let i = 1; i <= index; i++) {
+                distance += points[i - 1].distanceTo(points[i]);
+            }
+            return distance;
+        },
+
+        formatPointTime: function(point, track) {
+            if (!point || !point.time) {
+                return 'n/a';
+            }
+            const parsed = Date.parse(point.time);
+            if (Number.isNaN(parsed)) {
+                return String(point.time);
+            }
+            const timeZone = track ? this.getTrackTimeZone(track) : null;
+            if (timeZone && typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+                const formatter = this.getTimeZoneFormatter(timeZone);
+                if (formatter && formatter.formatToParts) {
+                    const parts = formatter.formatToParts(new Date(parsed));
+                    const partValues = {};
+                    for (const part of parts) {
+                        if (part.type !== 'literal') {
+                            partValues[part.type] = part.value;
+                        }
+                    }
+                    if (
+                        partValues.hour &&
+                        partValues.minute &&
+                        partValues.second &&
+                        partValues.day &&
+                        partValues.month &&
+                        partValues.year
+                    ) {
+                        return this.formatDateParts(
+                            partValues.hour,
+                            partValues.minute,
+                            partValues.second,
+                            partValues.day,
+                            partValues.month,
+                            partValues.year
+                        );
+                    }
+                }
+            }
+            const date = new Date(parsed);
+            return this.formatDateParts(
+                this.pad2(date.getHours()),
+                this.pad2(date.getMinutes()),
+                this.pad2(date.getSeconds()),
+                this.pad2(date.getDate()),
+                this.pad2(date.getMonth() + 1),
+                String(date.getFullYear())
+            );
+        },
+
+        getTimeZoneFormatter: function(timeZone) {
+            if (!this._timeZoneFormatters) {
+                this._timeZoneFormatters = new Map();
+            }
+            if (!this._timeZoneFormatters.has(timeZone)) {
+                this._timeZoneFormatters.set(
+                    timeZone,
+                    new Intl.DateTimeFormat('en-GB', {
+                        timeZone,
+                        hour12: false,
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                    })
+                );
+            }
+            return this._timeZoneFormatters.get(timeZone);
+        },
+
+        formatDateParts: function(hours, minutes, seconds, day, month, year) {
+            return `${hours}:${minutes}:${seconds} ${day}.${month}.${year}`;
+        },
+
+        pad2: function(value) {
+            return String(value).padStart(2, '0');
+        },
+
+        getTrackTimeZone: function(track) {
+            const firstPoint = this.getTrackFirstPoint(track);
+            if (!firstPoint) {
+                return null;
+            }
+            if (
+                track._timeZone &&
+                track._timeZoneSource &&
+                track._timeZoneSource.lat === firstPoint.lat &&
+                track._timeZoneSource.lng === firstPoint.lng
+            ) {
+                return track._timeZone;
+            }
+            let timeZone;
+            try {
+                timeZone = tzLookup(firstPoint.lat, firstPoint.lng);
+            } catch (e) {
+                return null;
+            }
+            track._timeZone = timeZone;
+            track._timeZoneSource = {lat: firstPoint.lat, lng: firstPoint.lng};
+            return timeZone;
+        },
+
+        getTrackFirstPoint: function(track) {
+            const segments = this.getTrackPolylines(track);
+            for (const segment of segments) {
+                const latlngs = segment.getFixedLatLngs();
+                if (latlngs.length) {
+                    return latlngs[0];
+                }
+            }
+            const markers = this.getTrackPoints(track);
+            if (markers.length) {
+                return markers[0].latlng;
+            }
+            return null;
+        },
+
+        formatPointElevation: function(point) {
+            if (!point) {
+                return 'n/a';
+            }
+            if (point.ele !== undefined && point.ele !== null && point.ele !== '') {
+                return String(point.ele);
+            }
+            if (point.alt !== undefined && point.alt !== null) {
+                return point.alt.toFixed(1);
+            }
+            return 'n/a';
+        },
+
+        formatPointSpeed: function(points, index) {
+            const speed = this.getAveragePointSpeed(points, index);
+            if (speed === null) {
+                return 'n/a';
+            }
+            return `${(speed * 3.6).toFixed(1)} km/h`;
+        },
+
+        getAveragePointSpeed: function(points, index) {
+            if (index <= 0 || index >= points.length - 1) {
+                return null;
+            }
+            const prevSpeed = this.getSpeedBetweenPoints(points[index - 1], points[index]);
+            const nextSpeed = this.getSpeedBetweenPoints(points[index], points[index + 1]);
+            if (prevSpeed === null || nextSpeed === null) {
+                return null;
+            }
+            return (prevSpeed + nextSpeed) / 2;
+        },
+
+        getSpeedBetweenPoints: function(start, end) {
+            const startTime = this.getPointTimeMs(start);
+            const endTime = this.getPointTimeMs(end);
+            if (startTime === null || endTime === null) {
+                return null;
+            }
+            const deltaSeconds = (endTime - startTime) / 1000;
+            if (deltaSeconds <= 0) {
+                return null;
+            }
+            const distance = start.distanceTo(end);
+            return distance / deltaSeconds;
+        },
+
+        getPointTimeMs: function(point) {
+            if (!point || !point.time) {
+                return null;
+            }
+            const parsed = Date.parse(point.time);
+            if (Number.isNaN(parsed)) {
+                return null;
+            }
+            return parsed;
+        },
+
         addTrackSegment: function(track, sourcePoints) {
-            var polyline = new TrackSegment(sourcePoints || [], {
+            const latlngs = (sourcePoints || []).map(toLatLngWithMeta);
+            var polyline = new TrackSegment(latlngs, {
                     color: this.colors[track.color()],
                     print: true
                 }
@@ -1006,8 +2039,19 @@ L.Control.TrackList = L.Control.extend({
             polyline.on('nodeschanged', this.onTrackSegmentNodesChanged.bind(this, track, polyline));
             polyline.on('noderightclick', this.onNodeRightClickShowMenu, this);
             polyline.on('segmentrightclick', this.onSegmentRightClickShowMenu, this);
-            polyline.on('mouseover', () => this.onTrackMouseEnter(track));
-            polyline.on('mouseout', () => this.onTrackMouseLeave(track));
+            polyline.on('mouseover', (e) => {
+                if (e && e.latlng) {
+                    polyline._lastMouseLatLng = e.latlng;
+                }
+                this.onTrackMouseEnter(track);
+                this.updateMetadataPointHighlight(polyline);
+                this.updateSegmentTooltipContent(polyline);
+            });
+            polyline.on('mouseout', () => {
+                polyline._lastMouseLatLng = null;
+                this.onTrackMouseLeave(track);
+            });
+            polyline.on('mousemove', this.onTrackSegmentMouseMove.bind(this, track, polyline));
             polyline.on('editstart', () => this.onTrackEditStart(track));
             polyline.on('editend', () => this.onTrackEditEnd(track));
             polyline.on('drawend', this.onTrackSegmentDrawEnd, this);
@@ -1022,6 +2066,54 @@ L.Control.TrackList = L.Control.extend({
             this.recalculateTrackLength(track);
             this.notifyTracksChanged();
             return polyline;
+        },
+
+        onTrackSegmentMouseMove: function(track, segment, e) {
+            if (e && e.latlng) {
+                segment._lastMouseLatLng = e.latlng;
+            }
+            this.updateMetadataPointHighlight(segment);
+            this.updateSegmentTooltipContent(segment);
+        },
+
+        updateSegmentTooltipContent: function(segment) {
+            const tooltip = segment.getTooltip ? segment.getTooltip() : segment._tooltip;
+            if (tooltip) {
+                tooltip.setContent(this.formatSegmentTooltip(segment));
+            }
+        },
+
+        updateMetadataPointHighlight: function(segment) {
+            const nearestInfo = this.getNearestPointInfo(segment);
+            if (!nearestInfo) {
+                this.hideMetadataPointHighlight();
+                return;
+            }
+            this.showMetadataPointHighlight(nearestInfo.point);
+        },
+
+        showMetadataPointHighlight: function(latlng) {
+            if (!this._metadataPointHighlight) {
+                this._metadataPointHighlight = L.circleMarker(latlng, {
+                    radius: 10,
+                    color: '#00f',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillColor: '#00f',
+                    fillOpacity: 0.8,
+                    interactive: false,
+                });
+            }
+            this._metadataPointHighlight.setLatLng(latlng);
+            if (this._map && !this._map.hasLayer(this._metadataPointHighlight)) {
+                this._metadataPointHighlight.addTo(this._map);
+            }
+        },
+
+        hideMetadataPointHighlight: function() {
+            if (this._metadataPointHighlight && this._map && this._map.hasLayer(this._metadataPointHighlight)) {
+                this._map.removeLayer(this._metadataPointHighlight);
+            }
         },
 
         onNodeRightClickShowMenu: function(e) {
@@ -1267,6 +2359,7 @@ L.Control.TrackList = L.Control.extend({
 
         onTrackMouseLeave: function(track) {
             track.hover(false);
+            this.hideMetadataPointHighlight();
         },
 
         onTrackEditStart: function(track) {
@@ -1293,16 +2386,16 @@ L.Control.TrackList = L.Control.extend({
 
         splitTrackSegment: function(trackSegment, nodeIndex, latlng) {
             var latlngs = trackSegment.getLatLngs();
-            latlngs = latlngs.map((latlng) => latlng.clone());
+            latlngs = latlngs.map((latlng) => cloneLatLngWithMeta(latlng));
             var latlngs1 = latlngs.slice(0, nodeIndex + 1),
                 latlngs2 = latlngs.slice(nodeIndex + 1);
             if (latlng) {
                 latlng = closestPointToLineSegment(latlngs, nodeIndex, latlng);
-                latlngs1.push(latlng.clone());
+                latlngs1.push(cloneLatLngWithMeta(latlng));
             } else {
                 latlng = latlngs[nodeIndex];
             }
-            latlngs2.unshift(latlng.clone());
+            latlngs2.unshift(cloneLatLngWithMeta(latlng));
             this.deleteTrackSegment(trackSegment);
             var segment1 = this.addTrackSegment(trackSegment._parentTrack, latlngs1);
             this.addTrackSegment(trackSegment._parentTrack, latlngs2);
@@ -1318,11 +2411,7 @@ L.Control.TrackList = L.Control.extend({
 
         newTrackFromSegment: function(trackSegment) {
             var srcNodes = trackSegment.getLatLngs(),
-                newNodes = [],
-                i;
-            for (i = 0; i < srcNodes.length; i++) {
-                newNodes.push([srcNodes[i].lat, srcNodes[i].lng]);
-            }
+                newNodes = srcNodes.map((latlng) => cloneLatLngWithMeta(latlng));
             this.addTrack({name: "New track", tracks: [newNodes]});
         },
 
@@ -1342,7 +2431,8 @@ L.Control.TrackList = L.Control.extend({
                 feature: L.featureGroup([]),
                 markers: [],
                 hover: ko.observable(false),
-                isEdited: ko.observable(false)
+                isEdited: ko.observable(false),
+                showExtendedTrackpointMeta: ko.observable(false)
             };
             (geodata.tracks || []).forEach(this.addTrackSegment.bind(this, track));
             (geodata.points || []).forEach(this.addPoint.bind(this, track));
@@ -1537,7 +2627,7 @@ L.Control.TrackList = L.Control.extend({
 
             for (const track of tracks) {
                 for (let segment of this.getTrackPolylines(track)) {
-                    const points = segment.getFixedLatLngs().map(({lat, lng}) => ({lat, lng}));
+                    const points = segment.getFixedLatLngs().map((latlng) => cloneLatLngWithMeta(latlng));
                     newTrackSegments.push(points);
                 }
                 const points = this.getTrackPoints(track).map((point) => ({
@@ -1588,8 +2678,10 @@ L.Control.TrackList = L.Control.extend({
         showElevationProfileForSegment: function(line) {
             this.hideElevationProfile();
             this.stopEditLine();
+            const track = line._parentTrack;
             this._elevationControl = new ElevationProfile(this._map, line.getLatLngs(), {
-                    samplingInterval: calcSamplingInterval(line.getLength())
+                    samplingInterval: calcSamplingInterval(line.getLength()),
+                    timeZone: track ? this.getTrackTimeZone(track) : null,
                 }
             );
             this.fire('elevation-shown');
@@ -1607,7 +2699,8 @@ L.Control.TrackList = L.Control.extend({
             }
             this.hideElevationProfile();
             this._elevationControl = new ElevationProfile(this._map, path, {
-                    samplingInterval: calcSamplingInterval(new L.MeasuredLine(path).getLength())
+                    samplingInterval: calcSamplingInterval(new L.MeasuredLine(path).getLength()),
+                    timeZone: this.getTrackTimeZone(track),
                 }
             );
             this.fire('elevation-shown');
