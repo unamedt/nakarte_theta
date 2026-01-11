@@ -31,6 +31,7 @@ import {parseNktkSequence} from './lib/parsers/nktk';
 import * as coordFormats from '~/lib/leaflet.control.coordinates/formats';
 import {polygonArea} from '~/lib/polygon-area';
 import {polylineHasSelfIntersections} from '~/lib/polyline-selfintersects';
+import {cloneLatLngWithMeta, toLatLngWithMeta} from '~/lib/leaflet.latlng-meta';
 
 const TRACKLIST_TRACK_COLORS = ['#77f', '#f95', '#0ff', '#f77', '#f7f', '#ee5'];
 
@@ -637,7 +638,7 @@ L.Control.TrackList = L.Control.extend({
 
         duplicateTrack: function(track) {
             const segments = this.getTrackPolylines(track).map((line) =>
-                line.getLatLngs().map((latlng) => [latlng.lat, latlng.lng])
+                line.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng))
             );
             const points = this.getTrackPoints(track)
                 .map((point) => ({lat: point.latlng.lat, lng: point.latlng.lng, name: point.label}));
@@ -646,12 +647,7 @@ L.Control.TrackList = L.Control.extend({
 
         reverseTrackSegment: function(trackSegment) {
             trackSegment.stopDrawingLine();
-            var latlngs = trackSegment.getLatLngs();
-            latlngs = latlngs.map(function(ll) {
-                    return [ll.lat, ll.lng];
-                }
-            );
-            latlngs.reverse();
+            var latlngs = trackSegment.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng)).reverse();
             var isEdited = (this._editedLine === trackSegment);
             this.deleteTrackSegment(trackSegment);
             var newTrackSegment = this.addTrackSegment(trackSegment._parentTrack, latlngs);
@@ -915,8 +911,8 @@ L.Control.TrackList = L.Control.extend({
         joinTrackSegments: function(newSegment, joinToStart) {
             this.hideLineCursor();
             var originalSegment = this._editedLine;
-            var latlngs = originalSegment.getLatLngs(),
-                latngs2 = newSegment.getLatLngs();
+            var latlngs = originalSegment.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng)),
+                latngs2 = newSegment.getLatLngs().map((latlng) => cloneLatLngWithMeta(latlng));
             if (joinToStart === this._lineJoinFromStart) {
                 latngs2.reverse();
             }
@@ -925,10 +921,6 @@ L.Control.TrackList = L.Control.extend({
             } else {
                 latlngs.push(...latngs2);
             }
-            latlngs = latlngs.map(function(ll) {
-                    return [ll.lat, ll.lng];
-                }
-            );
             this.deleteTrackSegment(originalSegment);
             if (originalSegment._parentTrack === newSegment._parentTrack) {
                 this.deleteTrackSegment(newSegment);
@@ -995,7 +987,8 @@ L.Control.TrackList = L.Control.extend({
         },
 
         addTrackSegment: function(track, sourcePoints) {
-            var polyline = new TrackSegment(sourcePoints || [], {
+            const latlngs = (sourcePoints || []).map(toLatLngWithMeta);
+            var polyline = new TrackSegment(latlngs, {
                     color: this.colors[track.color()],
                     print: true
                 }
@@ -1293,16 +1286,16 @@ L.Control.TrackList = L.Control.extend({
 
         splitTrackSegment: function(trackSegment, nodeIndex, latlng) {
             var latlngs = trackSegment.getLatLngs();
-            latlngs = latlngs.map((latlng) => latlng.clone());
+            latlngs = latlngs.map((latlng) => cloneLatLngWithMeta(latlng));
             var latlngs1 = latlngs.slice(0, nodeIndex + 1),
                 latlngs2 = latlngs.slice(nodeIndex + 1);
             if (latlng) {
                 latlng = closestPointToLineSegment(latlngs, nodeIndex, latlng);
-                latlngs1.push(latlng.clone());
+                latlngs1.push(cloneLatLngWithMeta(latlng));
             } else {
                 latlng = latlngs[nodeIndex];
             }
-            latlngs2.unshift(latlng.clone());
+            latlngs2.unshift(cloneLatLngWithMeta(latlng));
             this.deleteTrackSegment(trackSegment);
             var segment1 = this.addTrackSegment(trackSegment._parentTrack, latlngs1);
             this.addTrackSegment(trackSegment._parentTrack, latlngs2);
@@ -1318,11 +1311,7 @@ L.Control.TrackList = L.Control.extend({
 
         newTrackFromSegment: function(trackSegment) {
             var srcNodes = trackSegment.getLatLngs(),
-                newNodes = [],
-                i;
-            for (i = 0; i < srcNodes.length; i++) {
-                newNodes.push([srcNodes[i].lat, srcNodes[i].lng]);
-            }
+                newNodes = srcNodes.map((latlng) => cloneLatLngWithMeta(latlng));
             this.addTrack({name: "New track", tracks: [newNodes]});
         },
 
@@ -1537,7 +1526,7 @@ L.Control.TrackList = L.Control.extend({
 
             for (const track of tracks) {
                 for (let segment of this.getTrackPolylines(track)) {
-                    const points = segment.getFixedLatLngs().map(({lat, lng}) => ({lat, lng}));
+                    const points = segment.getFixedLatLngs().map((latlng) => cloneLatLngWithMeta(latlng));
                     newTrackSegments.push(points);
                 }
                 const points = this.getTrackPoints(track).map((point) => ({
