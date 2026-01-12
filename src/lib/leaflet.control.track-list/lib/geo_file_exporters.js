@@ -2,6 +2,15 @@ import utf8 from 'utf8';
 import escapeHtml from 'escape-html';
 import {saveNktk} from './parsers/nktk';
 
+const GPX_XMLNS_RE = /\sxmlns="http:\/\/www\.topografix\.com\/GPX\/1\/1"/ug;
+
+function stripGpxXmlns(xml) {
+    if (!xml) {
+        return xml;
+    }
+    return xml.replace(GPX_XMLNS_RE, '');
+}
+
 function formatPointAttributes(point) {
     const attrs = point.meta && point.meta.attributes;
     if (!attrs) {
@@ -38,7 +47,7 @@ function getPointExtra(point) {
     if (!point.meta || !point.meta.extra) {
         return [];
     }
-    return point.meta.extra.filter(Boolean);
+    return point.meta.extra.filter(Boolean).map(stripGpxXmlns);
 }
 
 function saveGpx(segments, name, points, withElevations = false) {
