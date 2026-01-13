@@ -50,25 +50,6 @@ function getPointExtra(point) {
     return point.meta.extra.filter(Boolean).map(stripGpxXmlns);
 }
 
-function appendExtraNodes(gpx, extraNodes) {
-    for (const extraNode of extraNodes) {
-        const trimmed = extraNode.trim();
-        if (!trimmed) {
-            continue;
-        }
-        const formattedLines = formatExtensionsNode(trimmed);
-        if (formattedLines) {
-            for (const line of formattedLines) {
-                gpx.push(`\t\t\t\t${line}`);
-            }
-            continue;
-        }
-        for (const line of trimmed.split('\n')) {
-            gpx.push(`\t\t\t\t${line}`);
-        }
-    }
-}
-
 function formatExtensionsNode(xml) {
     if (xml.includes('\n')) {
         return null;
@@ -105,6 +86,25 @@ function formatExtensionsNode(xml) {
     }
     lines.push(closeTag);
     return lines;
+}
+
+function appendExtraNodes(gpx, extraNodes) {
+    for (const extraNode of extraNodes) {
+        const trimmed = extraNode.trim();
+        if (!trimmed) {
+            continue;
+        }
+        const formattedLines = formatExtensionsNode(trimmed);
+        if (formattedLines) {
+            for (const line of formattedLines) {
+                gpx.push(`\t\t\t\t${line}`);
+            }
+            continue;
+        }
+        for (const line of trimmed.split('\n')) {
+            gpx.push(`\t\t\t\t${line}`);
+        }
+    }
 }
 
 function saveGpx(segments, name, points, withElevations = false) {
