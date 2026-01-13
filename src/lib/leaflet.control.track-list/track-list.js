@@ -609,6 +609,14 @@ L.Control.TrackList = L.Control.extend({
                 {text: 'Duplicate', callback: this.duplicateTrack.bind(this, track)},
                 {text: 'Reverse', callback: this.reverseTrack.bind(this, track)},
                 {text: 'Show elevation profile', callback: this.showElevationProfileForTrack.bind(this, track)},
+                () => {
+                    const checked = track.showMetadata && track.showMetadata();
+                    const box = checked ? '[x]' : '[ ]';
+                    return {
+                        text: `${box} show metadata`,
+                        callback: () => track.showMetadata(!checked)
+                    };
+                },
                 '-',
                 {text: 'Delete', callback: this.removeTrack.bind(this, track)},
                 '-',
@@ -977,13 +985,136 @@ L.Control.TrackList = L.Control.extend({
             if (!segmentArea) {
                 segmentArea = this.formatArea(polygonArea(points));
             }
+            const metadataBlock = this.formatSegmentPointMetadata(segment);
             return `
                 <b>${track.name()}</b><br>
                 <br>
                 Segment number: ${segmentOrdinalNumber} / ${trackSegmentsCount}<br>
                 Segment length: ${this.formatLength(segment.getLength())}<br>
                 Segment area: ${segmentArea}
+                ${metadataBlock}
             `;
+        },
+
+        formatSegmentPointMetadata: function(segment) {
+            const track = segment._parentTrack;
+            if (!track.showMetadata || !track.showMetadata()) {
+                return '';
+            }
+            const points = segment.getFixedLatLngs();
+            if (!points.length) {
+                return `
+                    <br>
+                    <br>
+                    Nearest point:<br>
+                    Distance from start: n/a<br>
+                    Time: n/a<br>
+                    Elevation: n/a<br>
+                    Speed: n/a
+                `;
+            }
+            const target = segment._lastMouseLatLng || points[0];
+            const nearestIndex = this.getNearestPointIndex(points, target);
+            const nearestPoint = points[nearestIndex];
+            const distanceFromStart = this.getDistanceFromStart(points, nearestIndex);
+            const timeText = this.formatPointTime(nearestPoint);
+            const elevationText = this.formatPointElevation(nearestPoint);
+            const speedText = this.formatPointSpeed(points, nearestIndex);
+            return `
+                <br>
+                <br>
+                Nearest point:<br>
+                Distance from start: ${this.formatLength(distanceFromStart)}<br>
+                Time: ${timeText}<br>
+                Elevation: ${elevationText}<br>
+                Speed: ${speedText}
+            `;
+        },
+
+        getNearestPointIndex: function(points, target) {
+            let nearestIndex = 0;
+            let minDist = Infinity;
+            for (let i = 0; i < points.length; i++) {
+                const dist = target.distanceTo(points[i]);
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearestIndex = i;
+                }
+            }
+            return nearestIndex;
+        },
+
+        getDistanceFromStart: function(points, index) {
+            let distance = 0;
+            for (let i = 1; i <= index; i++) {
+                distance += points[i - 1].distanceTo(points[i]);
+            }
+            return distance;
+        },
+
+        formatPointTime: function(point) {
+            if (!point || !point.time) {
+                return 'n/a';
+            }
+            return String(point.time);
+        },
+
+        formatPointElevation: function(point) {
+            if (!point) {
+                return 'n/a';
+            }
+            if (point.ele !== undefined && point.ele !== null && point.ele !== '') {
+                return String(point.ele);
+            }
+            if (point.alt !== undefined && point.alt !== null) {
+                return point.alt.toFixed(1);
+            }
+            return 'n/a';
+        },
+
+        formatPointSpeed: function(points, index) {
+            const speed = this.getAveragePointSpeed(points, index);
+            if (speed === null) {
+                return 'n/a';
+            }
+            return `${(speed * 3.6).toFixed(1)} km/h`;
+        },
+
+        getAveragePointSpeed: function(points, index) {
+            if (index <= 0 || index >= points.length - 1) {
+                return null;
+            }
+            const prevSpeed = this.getSpeedBetweenPoints(points[index - 1], points[index]);
+            const nextSpeed = this.getSpeedBetweenPoints(points[index], points[index + 1]);
+            if (prevSpeed === null || nextSpeed === null) {
+                return null;
+            }
+            return (prevSpeed + nextSpeed) / 2;
+        },
+
+        getSpeedBetweenPoints: function(start, end) {
+            const startTime = this.getPointTimeMs(start);
+            const endTime = this.getPointTimeMs(end);
+            if (startTime === null || endTime === null) {
+                return null;
+            }
+            const deltaSeconds = (endTime - startTime) / 1000;
+            if (deltaSeconds <= 0) {
+                return null;
+            }
+            const distance = start.distanceTo(end);
+            return distance / deltaSeconds;
+        },
+
+        getPointTimeMs: function(point) {
+            if (!point || !point.time) {
+                return null;
+            }
+            const parsed = Date.parse(point.time);
+            if (Number.isNaN(parsed)) {
+                return null;
+            }
+            return parsed;
         },
 
         addTrackSegment: function(track, sourcePoints) {
@@ -999,8 +1130,14 @@ L.Control.TrackList = L.Control.extend({
             polyline.on('nodeschanged', this.onTrackSegmentNodesChanged.bind(this, track, polyline));
             polyline.on('noderightclick', this.onNodeRightClickShowMenu, this);
             polyline.on('segmentrightclick', this.onSegmentRightClickShowMenu, this);
-            polyline.on('mouseover', () => this.onTrackMouseEnter(track));
+            polyline.on('mouseover', (e) => {
+                if (e && e.latlng) {
+                    polyline._lastMouseLatLng = e.latlng;
+                }
+                this.onTrackMouseEnter(track);
+            });
             polyline.on('mouseout', () => this.onTrackMouseLeave(track));
+            polyline.on('mousemove', this.onTrackSegmentMouseMove.bind(this, track, polyline));
             polyline.on('editstart', () => this.onTrackEditStart(track));
             polyline.on('editend', () => this.onTrackEditEnd(track));
             polyline.on('drawend', this.onTrackSegmentDrawEnd, this);
@@ -1015,6 +1152,19 @@ L.Control.TrackList = L.Control.extend({
             this.recalculateTrackLength(track);
             this.notifyTracksChanged();
             return polyline;
+        },
+
+        onTrackSegmentMouseMove: function(track, segment, e) {
+            if (e && e.latlng) {
+                segment._lastMouseLatLng = e.latlng;
+            }
+            if (!track.showMetadata || !track.showMetadata()) {
+                return;
+            }
+            const tooltip = segment.getTooltip ? segment.getTooltip() : segment._tooltip;
+            if (tooltip && tooltip._map) {
+                tooltip.setContent(this.formatSegmentTooltip(segment));
+            }
         },
 
         onNodeRightClickShowMenu: function(e) {
@@ -1331,7 +1481,8 @@ L.Control.TrackList = L.Control.extend({
                 feature: L.featureGroup([]),
                 markers: [],
                 hover: ko.observable(false),
-                isEdited: ko.observable(false)
+                isEdited: ko.observable(false),
+                showMetadata: ko.observable(false)
             };
             (geodata.tracks || []).forEach(this.addTrackSegment.bind(this, track));
             (geodata.points || []).forEach(this.addPoint.bind(this, track));
