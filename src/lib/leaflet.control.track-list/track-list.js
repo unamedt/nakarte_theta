@@ -973,77 +973,6 @@ L.Control.TrackList = L.Control.extend({
             return true;
         },
 
-        stripTagsFromSerializedPoint: function(point, selection) {
-            let changed = false;
-            let updated = point;
-            if (selection.time && point.t !== undefined) {
-                if (!changed) {
-                    updated = {...point};
-                    changed = true;
-                }
-                delete updated.t;
-            }
-            if (selection.ele && point.el !== undefined) {
-                if (!changed) {
-                    updated = {...point};
-                    changed = true;
-                }
-                delete updated.el;
-            }
-            if (selection.alt && point.al !== undefined) {
-                if (!changed) {
-                    updated = {...point};
-                    changed = true;
-                }
-                delete updated.al;
-            }
-            if (point.m && (selection.attrs.size || selection.extras.size)) {
-                let metaChanged = false;
-                let meta = point.m;
-                if (selection.attrs.size && meta.a) {
-                    const attrs = {...meta.a};
-                    for (const name of selection.attrs) {
-                        if (name in attrs) {
-                            delete attrs[name];
-                            metaChanged = true;
-                        }
-                    }
-                    if (metaChanged) {
-                        meta = {...meta, a: attrs};
-                        if (!Object.keys(attrs).length) {
-                            delete meta.a;
-                        }
-                    }
-                }
-                if (selection.extras.size && meta.x) {
-                    const filtered = this.filterExtraMetaArray(meta.x, selection.extras);
-                    if (filtered.changed) {
-                        if (!metaChanged) {
-                            meta = {...meta};
-                        }
-                        metaChanged = true;
-                        if (filtered.values.length) {
-                            meta.x = filtered.values;
-                        } else {
-                            delete meta.x;
-                        }
-                    }
-                }
-                if (metaChanged) {
-                    if (!changed) {
-                        updated = {...point};
-                        changed = true;
-                    }
-                    if (!meta.a && !meta.x) {
-                        delete updated.m;
-                    } else {
-                        updated.m = meta;
-                    }
-                }
-            }
-            return updated;
-        },
-
         stripTagsFromLatLng: function(latlng, selection) {
             if (selection.time) {
                 delete latlng.time;
@@ -1079,16 +1008,6 @@ L.Control.TrackList = L.Control.extend({
                     delete latlng.meta;
                 }
             }
-        },
-
-        buildTrackEntryWithoutTags: function(entry, selection) {
-            const updated = {...entry};
-            if (entry.t) {
-                updated.t = entry.t.map((segment) =>
-                    segment.map((point) => this.stripTagsFromSerializedPoint(point, selection))
-                );
-            }
-            return updated;
         },
 
         getUtf8Length: function(value) {
@@ -1250,7 +1169,7 @@ L.Control.TrackList = L.Control.extend({
                 });
             }
             const attributeTags = Array.from(stats.attributes.entries())
-                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .sort(([a], [b]) => a.localeCompare(b))
                 .map(([name, stat]) => ({
                     id: `attr:${name}`,
                     label: `@${name}`,
@@ -1258,7 +1177,7 @@ L.Control.TrackList = L.Control.extend({
                 }));
             tags.push(...attributeTags);
             const extraTags = Array.from(stats.extras.entries())
-                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .sort(([a], [b]) => a.localeCompare(b))
                 .map(([name, stat]) => ({
                     id: `extra:${name}`,
                     label: `<${name}>`,
@@ -1305,7 +1224,7 @@ L.Control.TrackList = L.Control.extend({
                 () => ({text: `${track.name()}`, header: true}),
                 '-',
             ];
-            if (!metaStats.tags.length) {
+            if (metaStats.tags.length === 0) {
                 items.push({text: 'No trackpoint meta tags', disabled: true});
             } else {
                 for (const tag of metaStats.tags) {
@@ -1395,7 +1314,9 @@ L.Control.TrackList = L.Control.extend({
             return {
                 clientX: position.x,
                 clientY: position.y,
-                preventDefault: function() {},
+                preventDefault: function() {
+                    return false;
+                },
                 defaultPrevented: false,
             };
         },
