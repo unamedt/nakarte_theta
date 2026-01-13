@@ -1166,8 +1166,12 @@ L.Control.TrackList = L.Control.extend({
                 }
                 this.onTrackMouseEnter(track);
                 this.updateMetadataPointHighlight(track, polyline);
+                this.updateSegmentTooltipContent(track, polyline);
             });
-            polyline.on('mouseout', () => this.onTrackMouseLeave(track));
+            polyline.on('mouseout', () => {
+                polyline._lastMouseLatLng = null;
+                this.onTrackMouseLeave(track);
+            });
             polyline.on('mousemove', this.onTrackSegmentMouseMove.bind(this, track, polyline));
             polyline.on('editstart', () => this.onTrackEditStart(track));
             polyline.on('editend', () => this.onTrackEditEnd(track));
@@ -1190,11 +1194,15 @@ L.Control.TrackList = L.Control.extend({
                 segment._lastMouseLatLng = e.latlng;
             }
             this.updateMetadataPointHighlight(track, segment);
+            this.updateSegmentTooltipContent(track, segment);
+        },
+
+        updateSegmentTooltipContent: function(track, segment) {
             if (!track.showMetadata || !track.showMetadata()) {
                 return;
             }
             const tooltip = segment.getTooltip ? segment.getTooltip() : segment._tooltip;
-            if (tooltip && tooltip._map) {
+            if (tooltip) {
                 tooltip.setContent(this.formatSegmentTooltip(segment));
             }
         },
