@@ -614,7 +614,13 @@ L.Control.TrackList = L.Control.extend({
                     const box = checked ? '[x]' : '[ ]';
                     return {
                         text: `${box} show metadata`,
-                        callback: () => track.showMetadata(!checked)
+                        callback: () => {
+                            const nextValue = !checked;
+                            track.showMetadata(nextValue);
+                            if (!nextValue) {
+                                this.hideMetadataPointHighlight();
+                            }
+                        }
                     };
                 },
                 '-',
@@ -1001,8 +1007,8 @@ L.Control.TrackList = L.Control.extend({
             if (!track.showMetadata || !track.showMetadata()) {
                 return '';
             }
-            const points = segment.getFixedLatLngs();
-            if (!points.length) {
+            const nearestInfo = this.getNearestPointInfo(segment);
+            if (!nearestInfo) {
                 return `
                     <br>
                     <br>
@@ -1013,13 +1019,10 @@ L.Control.TrackList = L.Control.extend({
                     Speed: n/a
                 `;
             }
-            const target = segment._lastMouseLatLng || points[0];
-            const nearestIndex = this.getNearestPointIndex(points, target);
-            const nearestPoint = points[nearestIndex];
-            const distanceFromStart = this.getDistanceFromStart(points, nearestIndex);
-            const timeText = this.formatPointTime(nearestPoint);
-            const elevationText = this.formatPointElevation(nearestPoint);
-            const speedText = this.formatPointSpeed(points, nearestIndex);
+            const {points, point, index, distanceFromStart} = nearestInfo;
+            const timeText = this.formatPointTime(point);
+            const elevationText = this.formatPointElevation(point);
+            const speedText = this.formatPointSpeed(points, index);
             return `
                 <br>
                 <br>
@@ -1029,6 +1032,21 @@ L.Control.TrackList = L.Control.extend({
                 Elevation: ${elevationText}<br>
                 Speed: ${speedText}
             `;
+        },
+
+        getNearestPointInfo: function(segment) {
+            const points = segment.getFixedLatLngs();
+            if (!points.length) {
+                return null;
+            }
+            const target = segment._lastMouseLatLng || points[0];
+            const index = this.getNearestPointIndex(points, target);
+            return {
+                points,
+                index,
+                point: points[index],
+                distanceFromStart: this.getDistanceFromStart(points, index),
+            };
         },
 
         getNearestPointIndex: function(points, target) {
@@ -1147,6 +1165,7 @@ L.Control.TrackList = L.Control.extend({
                     polyline._lastMouseLatLng = e.latlng;
                 }
                 this.onTrackMouseEnter(track);
+                this.updateMetadataPointHighlight(track, polyline);
             });
             polyline.on('mouseout', () => this.onTrackMouseLeave(track));
             polyline.on('mousemove', this.onTrackSegmentMouseMove.bind(this, track, polyline));
@@ -1170,12 +1189,50 @@ L.Control.TrackList = L.Control.extend({
             if (e && e.latlng) {
                 segment._lastMouseLatLng = e.latlng;
             }
+            this.updateMetadataPointHighlight(track, segment);
             if (!track.showMetadata || !track.showMetadata()) {
                 return;
             }
             const tooltip = segment.getTooltip ? segment.getTooltip() : segment._tooltip;
             if (tooltip && tooltip._map) {
                 tooltip.setContent(this.formatSegmentTooltip(segment));
+            }
+        },
+
+        updateMetadataPointHighlight: function(track, segment) {
+            if (!track.showMetadata || !track.showMetadata()) {
+                this.hideMetadataPointHighlight();
+                return;
+            }
+            const nearestInfo = this.getNearestPointInfo(segment);
+            if (!nearestInfo) {
+                this.hideMetadataPointHighlight();
+                return;
+            }
+            this.showMetadataPointHighlight(nearestInfo.point);
+        },
+
+        showMetadataPointHighlight: function(latlng) {
+            if (!this._metadataPointHighlight) {
+                this._metadataPointHighlight = L.circleMarker(latlng, {
+                    radius: 10,
+                    color: '#00f',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillColor: '#00f',
+                    fillOpacity: 0.8,
+                    interactive: false,
+                });
+            }
+            this._metadataPointHighlight.setLatLng(latlng);
+            if (this._map && !this._map.hasLayer(this._metadataPointHighlight)) {
+                this._metadataPointHighlight.addTo(this._map);
+            }
+        },
+
+        hideMetadataPointHighlight: function() {
+            if (this._metadataPointHighlight && this._map && this._map.hasLayer(this._metadataPointHighlight)) {
+                this._map.removeLayer(this._metadataPointHighlight);
             }
         },
 
@@ -1422,6 +1479,7 @@ L.Control.TrackList = L.Control.extend({
 
         onTrackMouseLeave: function(track) {
             track.hover(false);
+            this.hideMetadataPointHighlight();
         },
 
         onTrackEditStart: function(track) {
