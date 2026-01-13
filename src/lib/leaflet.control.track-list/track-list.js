@@ -1190,11 +1190,13 @@ L.Control.TrackList = L.Control.extend({
             } else {
                 for (const tag of metaStats.tags) {
                     const checked = selection.has(tag.id);
-                    const box = checked ? '[x]' : '[ ]';
                     const sizeText = this.formatSizeKb(tag.sizeBytes);
                     const label = escapeHtml(tag.label);
+                    const checkedAttr = checked ? ' checked="checked"' : '';
                     items.push({
-                        text: `${box} ${label} (${sizeText} kb)`,
+                        text: `<label class="meta-cleanup-label">` +
+                            `<input type="checkbox" class="leaflet-control-layers-selector"${checkedAttr}>` +
+                            `<span>${label} (${sizeText} kb)</span></label>`,
                         callback: (event) => {
                             if (checked) {
                                 selection.delete(tag.id);

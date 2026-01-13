@@ -197,6 +197,10 @@
     width: 100%;
 }
 
+.contextmenu .meta-cleanup-label {
+    display: inline-block;
+}
+
 .track-waypoint {
     display: block;
     width: 21px !important;
