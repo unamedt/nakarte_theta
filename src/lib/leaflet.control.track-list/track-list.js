@@ -634,6 +634,13 @@ L.Control.TrackList = L.Control.extend({
                         callback: () => track.showExtendedTrackpointMeta(!checked),
                     };
                 },
+                () => {
+                    const sizeText = this.formatSizeKb(this.getTrackSerializedSize(track));
+                    return {
+                        text: `size: ${sizeText} kb. clear meta`,
+                        callback: this.showTrackMetaCleanupMenu.bind(this, track),
+                    };
+                },
                 '-',
                 {text: 'Delete', callback: this.removeTrack.bind(this, track)},
                 '-',
@@ -832,6 +839,443 @@ L.Control.TrackList = L.Control.extend({
                 }
             }
             return point;
+        },
+
+        getTrackJsonEntry: function(track) {
+            const payload = this.serializeTracksToJson([track]);
+            if (!payload.length) {
+                return null;
+            }
+            return payload[0];
+        },
+
+        getTrackJsonEncodedLength: function(entry) {
+            if (!entry) {
+                return 0;
+            }
+            let jsonString = JSON.stringify([entry]);
+            jsonString = utf8.encode(jsonString);
+            return urlSafeBase64.encode(jsonString).length;
+        },
+
+        getTrackSerializedSize: function(track) {
+            return this.getTrackJsonEncodedLength(this.getTrackJsonEntry(track));
+        },
+
+        formatSizeKb: function(bytes) {
+            if (!Number.isFinite(bytes) || bytes <= 0) {
+                return '0';
+            }
+            const kb = bytes / 1024;
+            if (kb < 0.1) {
+                return '0.1';
+            }
+            if (kb < 10) {
+                return kb.toFixed(1);
+            }
+            return String(Math.round(kb));
+        },
+
+        buildMetaTagSelection: function(tagIds) {
+            const selection = {
+                time: false,
+                ele: false,
+                alt: false,
+                attrs: new Set(),
+                extras: new Set(),
+            };
+            for (const tagId of tagIds) {
+                if (tagId === 'time') {
+                    selection.time = true;
+                } else if (tagId === 'ele') {
+                    selection.ele = true;
+                } else if (tagId === 'alt') {
+                    selection.alt = true;
+                } else if (tagId.startsWith('attr:')) {
+                    selection.attrs.add(tagId.slice(5));
+                } else if (tagId.startsWith('extra:')) {
+                    selection.extras.add(tagId.slice(6));
+                }
+            }
+            return selection;
+        },
+
+        filterExtraMetaArray: function(extraArray, extrasToRemove) {
+            if (!Array.isArray(extraArray) || !extraArray.length || !extrasToRemove.size) {
+                return {values: extraArray, changed: false};
+            }
+            if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+                return {values: extraArray, changed: false};
+            }
+            const result = [];
+            let changed = false;
+            for (const extra of extraArray) {
+                const filtered = this.filterExtraMetaXml(extra, extrasToRemove);
+                if (filtered.changed) {
+                    changed = true;
+                }
+                result.push(...filtered.values);
+            }
+            if (!changed) {
+                return {values: extraArray, changed: false};
+            }
+            return {values: result, changed: true};
+        },
+
+        filterExtraMetaXml: function(extra, extrasToRemove) {
+            const xml = String(extra || '').trim();
+            if (!xml) {
+                return {values: [], changed: Boolean(extra)};
+            }
+            if (!extrasToRemove.size || typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+                return {values: [xml], changed: false};
+            }
+            const doc = new DOMParser().parseFromString(`<root>${xml}</root>`, 'text/xml');
+            if (!doc || !doc.documentElement || doc.documentElement.nodeName === 'parsererror') {
+                return {values: [xml], changed: false};
+            }
+            const serializer = new XMLSerializer();
+            const state = {changed: false};
+            const values = [];
+            for (const child of Array.from(doc.documentElement.children)) {
+                if (this.filterExtraMetaElement(child, '', extrasToRemove, state)) {
+                    values.push(serializer.serializeToString(child));
+                } else {
+                    state.changed = true;
+                }
+            }
+            if (!state.changed) {
+                return {values: [xml], changed: false};
+            }
+            return {values, changed: true};
+        },
+
+        filterExtraMetaElement: function(element, prefix, extrasToRemove, state) {
+            const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
+            if (extrasToRemove.has(name)) {
+                state.changed = true;
+                return false;
+            }
+            const children = Array.from(element.children);
+            for (const child of children) {
+                if (!this.filterExtraMetaElement(child, name, extrasToRemove, state)) {
+                    element.removeChild(child);
+                    state.changed = true;
+                }
+            }
+            if (!element.children.length) {
+                const value = (element.textContent || '').trim();
+                if (!value) {
+                    state.changed = true;
+                    return false;
+                }
+            }
+            return true;
+        },
+
+        stripTagsFromSerializedPoint: function(point, selection) {
+            let changed = false;
+            let updated = point;
+            if (selection.time && point.t !== undefined) {
+                if (!changed) {
+                    updated = {...point};
+                    changed = true;
+                }
+                delete updated.t;
+            }
+            if (selection.ele && point.el !== undefined) {
+                if (!changed) {
+                    updated = {...point};
+                    changed = true;
+                }
+                delete updated.el;
+            }
+            if (selection.alt && point.al !== undefined) {
+                if (!changed) {
+                    updated = {...point};
+                    changed = true;
+                }
+                delete updated.al;
+            }
+            if (point.m && (selection.attrs.size || selection.extras.size)) {
+                let metaChanged = false;
+                let meta = point.m;
+                if (selection.attrs.size && meta.a) {
+                    const attrs = {...meta.a};
+                    for (const name of selection.attrs) {
+                        if (name in attrs) {
+                            delete attrs[name];
+                            metaChanged = true;
+                        }
+                    }
+                    if (metaChanged) {
+                        meta = {...meta, a: attrs};
+                        if (!Object.keys(attrs).length) {
+                            delete meta.a;
+                        }
+                    }
+                }
+                if (selection.extras.size && meta.x) {
+                    const filtered = this.filterExtraMetaArray(meta.x, selection.extras);
+                    if (filtered.changed) {
+                        if (!metaChanged) {
+                            meta = {...meta};
+                        }
+                        metaChanged = true;
+                        if (filtered.values.length) {
+                            meta.x = filtered.values;
+                        } else {
+                            delete meta.x;
+                        }
+                    }
+                }
+                if (metaChanged) {
+                    if (!changed) {
+                        updated = {...point};
+                        changed = true;
+                    }
+                    if (!meta.a && !meta.x) {
+                        delete updated.m;
+                    } else {
+                        updated.m = meta;
+                    }
+                }
+            }
+            return updated;
+        },
+
+        stripTagsFromLatLng: function(latlng, selection) {
+            if (selection.time) {
+                delete latlng.time;
+            }
+            if (selection.ele) {
+                delete latlng.ele;
+            }
+            if (selection.alt) {
+                delete latlng.alt;
+            }
+            if (latlng.meta && (selection.attrs.size || selection.extras.size)) {
+                if (selection.attrs.size && latlng.meta.attributes) {
+                    for (const name of selection.attrs) {
+                        if (name in latlng.meta.attributes) {
+                            delete latlng.meta.attributes[name];
+                        }
+                    }
+                    if (!Object.keys(latlng.meta.attributes).length) {
+                        delete latlng.meta.attributes;
+                    }
+                }
+                if (selection.extras.size && latlng.meta.extra) {
+                    const filtered = this.filterExtraMetaArray(latlng.meta.extra, selection.extras);
+                    if (filtered.changed) {
+                        if (filtered.values.length) {
+                            latlng.meta.extra = filtered.values;
+                        } else {
+                            delete latlng.meta.extra;
+                        }
+                    }
+                }
+                if (!latlng.meta.attributes && !latlng.meta.extra) {
+                    delete latlng.meta;
+                }
+            }
+        },
+
+        buildTrackEntryWithoutTags: function(entry, selection) {
+            const updated = {...entry};
+            if (entry.t) {
+                updated.t = entry.t.map((segment) =>
+                    segment.map((point) => this.stripTagsFromSerializedPoint(point, selection))
+                );
+            }
+            return updated;
+        },
+
+        collectTrackMetaTags: function(track) {
+            let hasTime = false;
+            let hasEle = false;
+            let hasAlt = false;
+            const attributes = new Set();
+            const extraTags = new Set();
+            for (const segment of this.getTrackPolylines(track)) {
+                const latlngs = segment.getFixedLatLngs();
+                for (const latlng of latlngs) {
+                    if (!hasTime && latlng.time !== undefined && latlng.time !== null && latlng.time !== '') {
+                        hasTime = true;
+                    }
+                    if (!hasEle && latlng.ele !== undefined && latlng.ele !== null && latlng.ele !== '') {
+                        hasEle = true;
+                    }
+                    if (!hasAlt && latlng.alt !== undefined && latlng.alt !== null) {
+                        hasAlt = true;
+                    }
+                    if (latlng.meta && latlng.meta.attributes) {
+                        for (const name of Object.keys(latlng.meta.attributes)) {
+                            attributes.add(name);
+                        }
+                    }
+                    if (latlng.meta && Array.isArray(latlng.meta.extra)) {
+                        const entries = this.collectExtendedMetaEntries(latlng);
+                        for (const entry of entries) {
+                            extraTags.add(entry.name);
+                        }
+                    }
+                }
+            }
+            const tags = [];
+            if (hasTime) {
+                tags.push({id: 'time', label: 'time', group: 1});
+            }
+            if (hasEle) {
+                tags.push({id: 'ele', label: 'ele', group: 1});
+            }
+            if (hasAlt) {
+                tags.push({id: 'alt', label: 'alt', group: 1});
+            }
+            Array.from(attributes).sort().forEach((name) => {
+                tags.push({id: `attr:${name}`, label: `@${name}`, group: 2});
+            });
+            Array.from(extraTags).sort().forEach((name) => {
+                tags.push({id: `extra:${name}`, label: `<${name}>`, group: 3});
+            });
+            return tags;
+        },
+
+        getTrackMetaTagStats: function(track) {
+            const entry = this.getTrackJsonEntry(track);
+            if (!entry) {
+                return {baseSize: 0, tags: []};
+            }
+            const baseSize = this.getTrackJsonEncodedLength(entry);
+            const tags = this.collectTrackMetaTags(track).map((tag) => {
+                const selection = this.buildMetaTagSelection([tag.id]);
+                const filteredEntry = this.buildTrackEntryWithoutTags(entry, selection);
+                const sizeWithout = this.getTrackJsonEncodedLength(filteredEntry);
+                const sizeBytes = Math.max(0, baseSize - sizeWithout);
+                return {...tag, sizeBytes};
+            });
+            return {baseSize, tags};
+        },
+
+        getTrackMetaCleanupSelection: function(track) {
+            if (!track._metaCleanupSelection) {
+                track._metaCleanupSelection = new Set();
+            }
+            return track._metaCleanupSelection;
+        },
+
+        getTrackMetaCleanupStats: function(track, reuseCached = false) {
+            if (!reuseCached || !track._metaCleanupStats) {
+                track._metaCleanupStats = this.getTrackMetaTagStats(track);
+            }
+            return track._metaCleanupStats;
+        },
+
+        showTrackMetaCleanupMenu: function(track, e, keepPosition = false) {
+            const menuPosition = this.resolveMetaCleanupMenuPosition(track, e, keepPosition);
+            const selection = this.getTrackMetaCleanupSelection(track);
+            const metaStats = this.getTrackMetaCleanupStats(track, keepPosition);
+            const tagIds = new Set(metaStats.tags.map((tag) => tag.id));
+            for (const tagId of Array.from(selection)) {
+                if (!tagIds.has(tagId)) {
+                    selection.delete(tagId);
+                }
+            }
+            const items = [
+                () => ({text: `${track.name()}`, header: true}),
+                '-',
+            ];
+            if (!metaStats.tags.length) {
+                items.push({text: 'No trackpoint meta tags', disabled: true});
+            } else {
+                for (const tag of metaStats.tags) {
+                    const checked = selection.has(tag.id);
+                    const box = checked ? '[x]' : '[ ]';
+                    const sizeText = this.formatSizeKb(tag.sizeBytes);
+                    const label = escapeHtml(tag.label);
+                    items.push({
+                        text: `${box} ${label} (${sizeText} kb)`,
+                        callback: (event) => {
+                            if (checked) {
+                                selection.delete(tag.id);
+                            } else {
+                                selection.add(tag.id);
+                            }
+                            this.showTrackMetaCleanupMenu(track, event, true);
+                        },
+                    });
+                }
+            }
+            items.push('-');
+            items.push({
+                text: 'Delete',
+                disabled: selection.size === 0,
+                callback: () => {
+                    const tagIdsToDelete = new Set(selection);
+                    selection.clear();
+                    this.deleteTrackMetaTags(track, tagIdsToDelete);
+                },
+            });
+            new Contextmenu(items).show(this.createContextmenuEvent(menuPosition));
+        },
+
+        deleteTrackMetaTags: function(track, tagIds) {
+            if (!tagIds || !tagIds.size) {
+                return;
+            }
+            const selection = this.buildMetaTagSelection(tagIds);
+            for (const segment of this.getTrackPolylines(track)) {
+                const latlngs = segment.getFixedLatLngs();
+                for (const latlng of latlngs) {
+                    this.stripTagsFromLatLng(latlng, selection);
+                }
+            }
+            this.notifyTracksChanged();
+        },
+
+        resolveMetaCleanupMenuPosition: function(track, e, keepPosition) {
+            const position = keepPosition ? null : this.extractMenuPositionFromEvent(e);
+            if (position) {
+                track._metaCleanupMenuPosition = position;
+            }
+            if (track._metaCleanupMenuPosition) {
+                return track._metaCleanupMenuPosition;
+            }
+            return {x: window.innerWidth / 2, y: window.innerHeight / 2};
+        },
+
+        extractMenuPositionFromEvent: function(e) {
+            const event = e && e.originalEvent ? e.originalEvent : e;
+            const candidate = this.readMenuPositionFromEvent(event || e);
+            if (candidate) {
+                return candidate;
+            }
+            const target = (e && (e.currentTarget || e.target)) || null;
+            if (target && target.getBoundingClientRect) {
+                const rect = target.getBoundingClientRect();
+                return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+            }
+            return null;
+        },
+
+        readMenuPositionFromEvent: function(event) {
+            if (!event) {
+                return null;
+            }
+            const {clientX, clientY} = event;
+            if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+                return null;
+            }
+            return {x: clientX, y: clientY};
+        },
+
+        createContextmenuEvent: function(position) {
+            return {
+                clientX: position.x,
+                clientY: position.y,
+                preventDefault: function() {},
+                defaultPrevented: false,
+            };
         },
 
         copyTracksLinkToClipboard: function(tracks, mouseEvent, allowWithoutTracks = false) {
