@@ -7,6 +7,7 @@ Run code:
 ```bash
 git clone git@github.com:unamedt/nakarte_theta.git
 cd nakarte_theta
+git checkout advanced_tracks
 cp src/secrets.js.template src/secrets.js
 npm install
 npm run start
