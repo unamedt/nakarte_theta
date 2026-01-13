@@ -32,6 +32,7 @@ import {splitLinesAt180Meridian} from "./lib/meridian180";
 import {ElevationProvider} from '~/lib/elevations';
 import {parseNktkSequence} from './lib/parsers/nktk';
 import * as urlSafeBase64 from './lib/parsers/urlSafeBase64';
+import loadTracksFromJson from './lib/services/nakarte/loadTracksFromJson';
 import * as coordFormats from '~/lib/leaflet.control.coordinates/formats';
 import {polygonArea} from '~/lib/polygon-area';
 import {polylineHasSelfIntersections} from '~/lib/polyline-selfintersects';
@@ -694,6 +695,35 @@ L.Control.TrackList = L.Control.extend({
             let jsonString = JSON.stringify(jsonPayload);
             jsonString = utf8.encode(jsonString);
             return {paramName: 'nktj', payload: urlSafeBase64.encode(jsonString)};
+        },
+
+        serializeTracksForSession: function(tracks) {
+            const serialized = this.serializeTracksForHash(tracks);
+            if (!serialized) {
+                return null;
+            }
+            if (serialized.paramName === 'nktj') {
+                return {format: 'nktj', data: serialized.payload};
+            }
+            return {format: 'nktk', data: serialized.payload};
+        },
+
+        loadTracksFromSession: async function(sessionTracks, allowEmpty = false) {
+            if (!sessionTracks) {
+                return;
+            }
+            if (typeof sessionTracks === 'string') {
+                this.loadTracksFromString(sessionTracks, allowEmpty);
+                return;
+            }
+            if (sessionTracks.format === 'nktj' && sessionTracks.data) {
+                const geodata = await loadTracksFromJson(sessionTracks.data);
+                this.addTracksFromGeodataArray(geodata, allowEmpty);
+                return;
+            }
+            if (sessionTracks.format === 'nktk' && sessionTracks.data) {
+                this.loadTracksFromString(sessionTracks.data, allowEmpty);
+            }
         },
 
         tracksHavePointMeta: function(tracks) {

@@ -18,6 +18,69 @@ function parseWaypoint(rawPoint) {
     };
 }
 
+function buildTrackPoint(lat, lng, point) {
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return {valid: false};
+    }
+    return {valid: true, point: {lat, lng, ...point}};
+}
+
+function parseTrackPointMeta(rawPoint) {
+    if (!rawPoint.m || typeof rawPoint.m !== 'object') {
+        return null;
+    }
+    const meta = {};
+    if (rawPoint.m.a && typeof rawPoint.m.a === 'object') {
+        meta.attributes = rawPoint.m.a;
+    }
+    if (Array.isArray(rawPoint.m.x)) {
+        meta.extra = rawPoint.m.x;
+    }
+    return Object.keys(meta).length ? meta : null;
+}
+
+function parseTrackPointArray(rawPoint) {
+    if (rawPoint.length < 2) {
+        return {valid: false};
+    }
+    const lat = Number(rawPoint[0]);
+    const lng = Number(rawPoint[1]);
+    return buildTrackPoint(lat, lng, {});
+}
+
+function parseTrackPointObject(rawPoint) {
+    const lat = Number(rawPoint.lt ?? rawPoint.lat);
+    const lng = Number(rawPoint.ln ?? rawPoint.lng);
+    const point = {};
+    if (rawPoint.al !== undefined) {
+        const alt = Number(rawPoint.al);
+        if (!isNaN(alt)) {
+            point.alt = alt;
+        }
+    }
+    if (rawPoint.el !== undefined) {
+        point.ele = String(rawPoint.el);
+    }
+    if (rawPoint.t !== undefined) {
+        point.time = String(rawPoint.t);
+    }
+    const meta = parseTrackPointMeta(rawPoint);
+    if (meta) {
+        point.meta = meta;
+    }
+    return buildTrackPoint(lat, lng, point);
+}
+
+function parseTrackPoint(rawPoint) {
+    if (Array.isArray(rawPoint)) {
+        return parseTrackPointArray(rawPoint);
+    }
+    if (rawPoint && typeof rawPoint === 'object') {
+        return parseTrackPointObject(rawPoint);
+    }
+    return {valid: false};
+}
+
 function parseTrack(rawTrack) {
     if (!rawTrack.length) {
         return {valid: false};
@@ -38,53 +101,6 @@ function parseTrack(rawTrack) {
         track.push(segment);
     }
     return {valid: true, track};
-}
-
-function parseTrackPoint(rawPoint) {
-    let lat;
-    let lng;
-    let point = {};
-    if (Array.isArray(rawPoint)) {
-        if (rawPoint.length < 2) {
-            return {valid: false};
-        }
-        lat = Number(rawPoint[0]);
-        lng = Number(rawPoint[1]);
-    } else if (rawPoint && typeof rawPoint === 'object') {
-        lat = Number(rawPoint.lt ?? rawPoint.lat);
-        lng = Number(rawPoint.ln ?? rawPoint.lng);
-        if (rawPoint.al !== undefined) {
-            const alt = Number(rawPoint.al);
-            if (!isNaN(alt)) {
-                point.alt = alt;
-            }
-        }
-        if (rawPoint.el !== undefined) {
-            point.ele = String(rawPoint.el);
-        }
-        if (rawPoint.t !== undefined) {
-            point.time = String(rawPoint.t);
-        }
-        if (rawPoint.m && typeof rawPoint.m === 'object') {
-            const meta = {};
-            if (rawPoint.m.a && typeof rawPoint.m.a === 'object') {
-                meta.attributes = rawPoint.m.a;
-            }
-            if (Array.isArray(rawPoint.m.x)) {
-                meta.extra = rawPoint.m.x;
-            }
-            if (Object.keys(meta).length) {
-                point.meta = meta;
-            }
-        }
-    } else {
-        return {valid: false};
-    }
-    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-        return {valid: false};
-    }
-    point = {lat, lng, ...point};
-    return {valid: true, point};
 }
 
 async function loadTracksFromJson(value) { // eslint-disable-line complexity
