@@ -637,7 +637,7 @@ L.Control.TrackList = L.Control.extend({
                 () => {
                     const sizeText = this.formatSizeKb(this.getTrackSerializedSize(track));
                     return {
-                        text: `size: ${sizeText} kb. clear meta`,
+                        text: `clear track metadata. size: ${sizeText} kB`,
                         callback: this.showTrackMetaCleanupMenu.bind(this, track),
                     };
                 },
@@ -1291,6 +1291,15 @@ L.Control.TrackList = L.Control.extend({
                 if (!tagIds.has(tagId)) {
                     selection.delete(tagId);
                 }
+            }
+            if (!track._metaCleanupSelectionInitialized && metaStats.tags.length) {
+                selection.clear();
+                for (const tag of metaStats.tags) {
+                    if (tag.id !== 'time' && tag.id !== 'ele') {
+                        selection.add(tag.id);
+                    }
+                }
+                track._metaCleanupSelectionInitialized = true;
             }
             const items = [
                 () => ({text: `${track.name()}`, header: true}),
