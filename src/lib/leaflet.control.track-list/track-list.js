@@ -610,20 +610,6 @@ L.Control.TrackList = L.Control.extend({
                 {text: 'Duplicate', callback: this.duplicateTrack.bind(this, track)},
                 {text: 'Reverse', callback: this.reverseTrack.bind(this, track)},
                 {text: 'Show elevation profile', callback: this.showElevationProfileForTrack.bind(this, track)},
-                () => {
-                    const checked = track.showMetadata && track.showMetadata();
-                    const box = checked ? '[x]' : '[ ]';
-                    return {
-                        text: `${box} show metadata`,
-                        callback: () => {
-                            const nextValue = !checked;
-                            track.showMetadata(nextValue);
-                            if (!nextValue) {
-                                this.hideMetadataPointHighlight();
-                            }
-                        }
-                    };
-                },
                 '-',
                 {text: 'Delete', callback: this.removeTrack.bind(this, track)},
                 '-',
@@ -1005,9 +991,6 @@ L.Control.TrackList = L.Control.extend({
 
         formatSegmentPointMetadata: function(segment) {
             const track = segment._parentTrack;
-            if (!track.showMetadata || !track.showMetadata()) {
-                return '';
-            }
             const nearestInfo = this.getNearestPointInfo(segment);
             if (!nearestInfo) {
                 return `
@@ -1265,8 +1248,8 @@ L.Control.TrackList = L.Control.extend({
                     polyline._lastMouseLatLng = e.latlng;
                 }
                 this.onTrackMouseEnter(track);
-                this.updateMetadataPointHighlight(track, polyline);
-                this.updateSegmentTooltipContent(track, polyline);
+                this.updateMetadataPointHighlight(polyline);
+                this.updateSegmentTooltipContent(polyline);
             });
             polyline.on('mouseout', () => {
                 polyline._lastMouseLatLng = null;
@@ -1293,25 +1276,18 @@ L.Control.TrackList = L.Control.extend({
             if (e && e.latlng) {
                 segment._lastMouseLatLng = e.latlng;
             }
-            this.updateMetadataPointHighlight(track, segment);
-            this.updateSegmentTooltipContent(track, segment);
+            this.updateMetadataPointHighlight(segment);
+            this.updateSegmentTooltipContent(segment);
         },
 
-        updateSegmentTooltipContent: function(track, segment) {
-            if (!track.showMetadata || !track.showMetadata()) {
-                return;
-            }
+        updateSegmentTooltipContent: function(segment) {
             const tooltip = segment.getTooltip ? segment.getTooltip() : segment._tooltip;
             if (tooltip) {
                 tooltip.setContent(this.formatSegmentTooltip(segment));
             }
         },
 
-        updateMetadataPointHighlight: function(track, segment) {
-            if (!track.showMetadata || !track.showMetadata()) {
-                this.hideMetadataPointHighlight();
-                return;
-            }
+        updateMetadataPointHighlight: function(segment) {
             const nearestInfo = this.getNearestPointInfo(segment);
             if (!nearestInfo) {
                 this.hideMetadataPointHighlight();
@@ -1659,8 +1635,7 @@ L.Control.TrackList = L.Control.extend({
                 feature: L.featureGroup([]),
                 markers: [],
                 hover: ko.observable(false),
-                isEdited: ko.observable(false),
-                showMetadata: ko.observable(false)
+                isEdited: ko.observable(false)
             };
             (geodata.tracks || []).forEach(this.addTrackSegment.bind(this, track));
             (geodata.points || []).forEach(this.addPoint.bind(this, track));
@@ -1906,8 +1881,10 @@ L.Control.TrackList = L.Control.extend({
         showElevationProfileForSegment: function(line) {
             this.hideElevationProfile();
             this.stopEditLine();
+            const track = line._parentTrack;
             this._elevationControl = new ElevationProfile(this._map, line.getLatLngs(), {
-                    samplingInterval: calcSamplingInterval(line.getLength())
+                    samplingInterval: calcSamplingInterval(line.getLength()),
+                    timeZone: track ? this.getTrackTimeZone(track) : null,
                 }
             );
             this.fire('elevation-shown');
@@ -1925,7 +1902,8 @@ L.Control.TrackList = L.Control.extend({
             }
             this.hideElevationProfile();
             this._elevationControl = new ElevationProfile(this._map, path, {
-                    samplingInterval: calcSamplingInterval(new L.MeasuredLine(path).getLength())
+                    samplingInterval: calcSamplingInterval(new L.MeasuredLine(path).getLength()),
+                    timeZone: this.getTrackTimeZone(track),
                 }
             );
             this.fire('elevation-shown');

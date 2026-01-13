@@ -84,7 +84,8 @@ function pathRegularSamples(latlngs, step) {
 const ElevationProfile = L.Class.extend({
         options: {
             samplingInterval: 50,
-            sightLine: false
+            sightLine: false,
+            timeZone: null
         },
 
         includes: L.Mixin.Events,
@@ -402,6 +403,7 @@ const ElevationProfile = L.Class.extend({
                 };
             }
             d.dist = (stats.distance / 1000).toFixed(2);
+            d.timeZone = this.options.timeZone || 'n/a';
 
             this.propsContainer.innerHTML = `
                 <table>
@@ -415,6 +417,7 @@ const ElevationProfile = L.Class.extend({
                 <tr class="start-group"><td>Total ascent:</td><td>${d.approx}${d.ascent}</td></tr>
                 <tr><td>Total descent:</td><td>${d.approx}${d.descent}</td></tr>
                 <tr class="start-group"><td>Distance:</td><td>${d.dist} km</td></tr>
+                <tr><td>Time zone:</td><td>${d.timeZone}</td></tr>
                 <tr><td colspan="2" style="text-align: center">${d.incomplete}</td></tr>
                 </table>
                 `;
