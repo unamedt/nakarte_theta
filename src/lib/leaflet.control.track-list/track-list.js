@@ -40,6 +40,18 @@ import {cloneLatLngWithMeta, toLatLngWithMeta} from '~/lib/leaflet.latlng-meta';
 
 const TRACKLIST_TRACK_COLORS = ['#77f', '#f95', '#0ff', '#f77', '#f7f', '#ee5'];
 
+function getTracksStorageConfig() {
+    const tracksStorage = config.tracksStorage || {};
+    return {
+        serverUrl: tracksStorage.serverUrl || config.tracksStorageServer,
+        enabled: tracksStorage.enabled !== false,
+        nktjInlineMaxLength: tracksStorage.nktjInlineMaxLength ?? 200000,
+        preferServerForLargePayloads: tracksStorage.preferServerForLargePayloads !== false,
+        saveTimeoutMs: tracksStorage.saveTimeoutMs ?? 5000,
+        loadTimeoutMs: tracksStorage.loadTimeoutMs ?? 30000,
+    };
+}
+
 const TrackSegment = L.MeasuredLine.extend({
     includes: L.Polyline.EditMixin,
 
@@ -685,12 +697,22 @@ L.Control.TrackList = L.Control.extend({
             if (!tracks.length) {
                 return null;
             }
+            const tracksStorage = getTracksStorageConfig();
+            const useServer = tracksStorage.enabled && tracksStorage.serverUrl;
             if (!this.tracksHavePointMeta(tracks)) {
-                return {paramName: 'nktl', payload: this.serializeTracks(tracks)};
+                const payload = this.serializeTracks(tracks);
+                if (!useServer) {
+                    return {paramName: 'nktk', payload};
+                }
+                return {paramName: 'nktl', payload};
             }
             const jsonPayload = this.serializeTracksToJson(tracks);
             if (!jsonPayload.length) {
-                return {paramName: 'nktl', payload: this.serializeTracks(tracks)};
+                const payload = this.serializeTracks(tracks);
+                if (!useServer) {
+                    return {paramName: 'nktk', payload};
+                }
+                return {paramName: 'nktl', payload};
             }
             let jsonString = JSON.stringify(jsonPayload);
             jsonString = utf8.encode(jsonString);
@@ -827,8 +849,55 @@ L.Control.TrackList = L.Control.extend({
                 notify('No tracks to copy');
                 return;
             }
+            const tracksStorage = getTracksStorageConfig();
+            const canUseServer = tracksStorage.enabled && tracksStorage.serverUrl;
             if (serialized.paramName === 'nktj') {
-                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktj: serialized.payload});
+                const shouldTryServer =
+                    canUseServer &&
+                    tracksStorage.preferServerForLargePayloads &&
+                    serialized.payload.length > tracksStorage.nktjInlineMaxLength;
+                if (!shouldTryServer) {
+                    const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktj: serialized.payload});
+                    copyToClipboard(url, mouseEvent);
+                    return;
+                }
+                const hashDigest = md5(serialized.payload, null, true);
+                const key = btoa(hashDigest).replace(/\//ug, '_').replace(/\+/ug, '-').replace(/=/ug, '');
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktj: `id:${key}`});
+                fetch(`${tracksStorage.serverUrl}/track/${key}`, {
+                    method: 'POST',
+                    data: serialized.payload,
+                    withCredentials: true,
+                    timeout: tracksStorage.saveTimeoutMs,
+                    maxTries: 1
+                }).then(
+                    () => {
+                        copyToClipboard(url, mouseEvent);
+                    },
+                    (e) => {
+                        let message = e.message || e;
+                        if (e.xhr?.status === 413) {
+                            message = 'track is too big';
+                        }
+                        logging.captureMessage('Failed to save track to server',
+                            {status: e.xhr?.status, response: e.xhr?.responseText});
+                        notify(`Tracks server is unavailable, using long link (${message})`);
+                        const fallbackUrl = getLinkToShare(
+                            this.options.keysToExcludeOnCopyLink,
+                            {nktj: serialized.payload}
+                        );
+                        copyToClipboard(fallbackUrl, mouseEvent);
+                    }
+                );
+                return;
+            }
+            if (serialized.paramName === 'nktk') {
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktk: serialized.payload});
+                copyToClipboard(url, mouseEvent);
+                return;
+            }
+            if (!canUseServer) {
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktk: serialized.payload});
                 copyToClipboard(url, mouseEvent);
                 return;
             }
@@ -836,10 +905,11 @@ L.Control.TrackList = L.Control.extend({
             const key = btoa(hashDigest).replace(/\//ug, '_').replace(/\+/ug, '-').replace(/=/ug, '');
             const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktl: key});
             copyToClipboard(url, mouseEvent);
-            fetch(`${config.tracksStorageServer}/track/${key}`, {
+            fetch(`${tracksStorage.serverUrl}/track/${key}`, {
                 method: 'POST',
                 data: serialized.payload,
-                withCredentials: true
+                withCredentials: true,
+                timeout: tracksStorage.saveTimeoutMs
             }).then(
                 null, (e) => {
                     let message = e.message || e;
