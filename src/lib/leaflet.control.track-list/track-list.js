@@ -23,6 +23,7 @@ import {notify, query} from '~/lib/notifications';
 import {fetch} from '~/lib/xhr-promise';
 import config from '~/config';
 import md5 from 'blueimp-md5';
+import escapeHtml from 'escape-html';
 import tzLookup from 'tz-lookup';
 import {wrapLatLngToTarget, wrapLatLngBoundsToTarget} from '~/lib/leaflet.fixes/fixWorldCopyJump';
 import {createZipFile} from '~/lib/zip-writer';
@@ -610,6 +611,14 @@ L.Control.TrackList = L.Control.extend({
                 {text: 'Duplicate', callback: this.duplicateTrack.bind(this, track)},
                 {text: 'Reverse', callback: this.reverseTrack.bind(this, track)},
                 {text: 'Show elevation profile', callback: this.showElevationProfileForTrack.bind(this, track)},
+                () => {
+                    const checked = track.showExtendedTrackpointMeta();
+                    const box = checked ? '[x]' : '[ ]';
+                    return {
+                        text: `${box} show extended trackpoint meta`,
+                        callback: () => track.showExtendedTrackpointMeta(!checked),
+                    };
+                },
                 '-',
                 {text: 'Delete', callback: this.removeTrack.bind(this, track)},
                 '-',
@@ -1007,6 +1016,7 @@ L.Control.TrackList = L.Control.extend({
             const timeText = this.formatPointTime(point, track);
             const elevationText = this.formatPointElevation(point);
             const speedText = this.formatPointSpeed(points, index);
+            const extendedMeta = this.formatSegmentPointExtendedMeta(point, track);
             return `
                 <br>
                 <br>
@@ -1015,7 +1025,83 @@ L.Control.TrackList = L.Control.extend({
                 Time: ${timeText}<br>
                 Elevation: ${elevationText}<br>
                 Speed: ${speedText}
+                ${extendedMeta}
             `;
+        },
+
+        formatSegmentPointExtendedMeta: function(point, track) {
+            if (!track.showExtendedTrackpointMeta || !track.showExtendedTrackpointMeta()) {
+                return '';
+            }
+            const entries = this.collectExtendedMetaEntries(point);
+            if (!entries.length) {
+                return `
+                    <br>
+                    <br>
+                    Extended trackpoint meta:<br>
+                    n/a
+                `;
+            }
+            const lines = entries.map(({name, value}) => {
+                const safeName = escapeHtml(String(name));
+                const safeValue = escapeHtml(String(value));
+                return `${safeName}: ${safeValue}`;
+            }).join('<br>');
+            return `
+                <br>
+                <br>
+                Extended trackpoint meta:<br>
+                ${lines}
+            `;
+        },
+
+        collectExtendedMetaEntries: function(point) {
+            if (!point || !point.meta || !Array.isArray(point.meta.extra)) {
+                return [];
+            }
+            if (typeof DOMParser === 'undefined') {
+                return [];
+            }
+            const entries = [];
+            for (const extraNode of point.meta.extra) {
+                const xml = String(extraNode || '').trim();
+                if (!xml) {
+                    continue;
+                }
+                const doc = new DOMParser().parseFromString(`<root>${xml}</root>`, 'text/xml');
+                if (!doc || !doc.documentElement || doc.documentElement.nodeName === 'parsererror') {
+                    continue;
+                }
+                for (const child of doc.documentElement.children) {
+                    this.collectExtendedMetaFromElement(child, '', entries);
+                }
+            }
+            return entries;
+        },
+
+        collectExtendedMetaFromElement: function(element, prefix, entries) {
+            const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
+            const children = Array.from(element.children);
+            if (!children.length) {
+                const value = (element.textContent || '').trim();
+                if (value) {
+                    entries.push({name, value});
+                }
+                return;
+            }
+            if (element.tagName === 'extensions') {
+                for (const child of children) {
+                    this.collectExtendedMetaFromElement(child, name, entries);
+                }
+                return;
+            }
+            const value = (element.textContent || '').trim();
+            if (value) {
+                entries.push({name, value});
+            }
+            for (const child of children) {
+                this.collectExtendedMetaFromElement(child, name, entries);
+            }
         },
 
         getNearestPointInfo: function(segment) {
@@ -1635,7 +1721,8 @@ L.Control.TrackList = L.Control.extend({
                 feature: L.featureGroup([]),
                 markers: [],
                 hover: ko.observable(false),
-                isEdited: ko.observable(false)
+                isEdited: ko.observable(false),
+                showExtendedTrackpointMeta: ko.observable(false)
             };
             (geodata.tracks || []).forEach(this.addTrackSegment.bind(this, track));
             (geodata.points || []).forEach(this.addPoint.bind(this, track));
