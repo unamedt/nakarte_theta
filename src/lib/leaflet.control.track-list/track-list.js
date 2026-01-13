@@ -951,6 +951,7 @@ L.Control.TrackList = L.Control.extend({
         },
 
         filterExtraMetaElement: function(element, prefix, extrasToRemove, state) {
+            this.stripWhitespaceTextNodes(element);
             const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
             if (extrasToRemove.has(name)) {
                 state.changed = true;
@@ -1141,6 +1142,15 @@ L.Control.TrackList = L.Control.extend({
             }
             for (const child of children) {
                 this.collectExtendedMetaStatsFromElement(child, name, extraStats);
+            }
+        },
+
+        stripWhitespaceTextNodes: function(element) {
+            const nodes = Array.from(element.childNodes);
+            for (const node of nodes) {
+                if (node.nodeType === 3 && !(node.nodeValue || '').trim()) {
+                    element.removeChild(node);
+                }
             }
         },
 

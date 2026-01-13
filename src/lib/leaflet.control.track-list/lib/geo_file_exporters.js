@@ -56,10 +56,55 @@ function appendExtraNodes(gpx, extraNodes) {
         if (!trimmed) {
             continue;
         }
+        const formattedLines = formatExtensionsNode(trimmed);
+        if (formattedLines) {
+            for (const line of formattedLines) {
+                gpx.push(`\t\t\t\t${line}`);
+            }
+            continue;
+        }
         for (const line of trimmed.split('\n')) {
             gpx.push(`\t\t\t\t${line}`);
         }
     }
+}
+
+function formatExtensionsNode(xml) {
+    if (xml.includes('\n')) {
+        return null;
+    }
+    if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+        return null;
+    }
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    const root = doc && doc.documentElement;
+    if (!root || root.nodeName === 'parsererror') {
+        return null;
+    }
+    const tagName = root.localName || root.tagName;
+    if (tagName !== 'extensions') {
+        return null;
+    }
+    const serializer = new XMLSerializer();
+    const serialized = serializer.serializeToString(root);
+    const children = Array.from(root.childNodes)
+        .filter((node) => node.nodeType === 1 || (node.nodeType === 3 && (node.nodeValue || '').trim()));
+    if (!children.length) {
+        return [serialized];
+    }
+    const openMatch = serialized.match(/^<[^>]+>/u);
+    const openTag = openMatch ? openMatch[0] : `<${root.tagName}>`;
+    const closeTag = `</${root.tagName}>`;
+    const lines = [openTag];
+    for (const child of children) {
+        if (child.nodeType === 3) {
+            lines.push(`\t${child.nodeValue.trim()}`);
+        } else {
+            lines.push(`\t${serializer.serializeToString(child)}`);
+        }
+    }
+    lines.push(closeTag);
+    return lines;
 }
 
 function saveGpx(segments, name, points, withElevations = false) {
