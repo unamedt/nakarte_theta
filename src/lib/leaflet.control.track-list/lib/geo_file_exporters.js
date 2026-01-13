@@ -50,6 +50,18 @@ function getPointExtra(point) {
     return point.meta.extra.filter(Boolean).map(stripGpxXmlns);
 }
 
+function appendExtraNodes(gpx, extraNodes) {
+    for (const extraNode of extraNodes) {
+        const trimmed = extraNode.trim();
+        if (!trimmed) {
+            continue;
+        }
+        for (const line of trimmed.split('\n')) {
+            gpx.push(`\t\t\t\t${line}`);
+        }
+    }
+}
+
 function saveGpx(segments, name, points, withElevations = false) {
     const gpx = [];
     const fakeTime = '1970-01-01T00:00:01.000Z';
@@ -102,15 +114,7 @@ function saveGpx(segments, name, points, withElevations = false) {
                 if (time) {
                     gpx.push(`\t\t\t\t<time>${escapeHtml(String(time))}</time>`);
                 }
-                for (const extraNode of extra) {
-                    const trimmed = extraNode.trim();
-                    if (!trimmed) {
-                        continue;
-                    }
-                    for (const line of trimmed.split('\n')) {
-                        gpx.push(`\t\t\t\t${line}`);
-                    }
-                }
+                appendExtraNodes(gpx, extra);
                 gpx.push('\t\t\t</trkpt>');
             }
             gpx.push('\t\t</trkseg>');
