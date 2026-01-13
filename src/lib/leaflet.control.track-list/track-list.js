@@ -1091,70 +1091,181 @@ L.Control.TrackList = L.Control.extend({
             return updated;
         },
 
-        collectTrackMetaTags: function(track) {
-            let hasTime = false;
-            let hasEle = false;
-            let hasAlt = false;
-            const attributes = new Set();
-            const extraTags = new Set();
+        getUtf8Length: function(value) {
+            if (value === null || value === undefined) {
+                return 0;
+            }
+            const text = String(value);
+            if (!text.length) {
+                return 0;
+            }
+            return utf8.encode(text).length;
+        },
+
+        addMetaValueStat: function(map, name, value, allowEmpty = false) {
+            if (value === null || value === undefined) {
+                return;
+            }
+            const text = String(value);
+            if (!allowEmpty && text === '') {
+                return;
+            }
+            const valueLength = this.getUtf8Length(text);
+            let stat = map.get(name);
+            if (!stat) {
+                stat = {count: 0, valueLength: 0};
+                map.set(name, stat);
+            }
+            stat.count += 1;
+            stat.valueLength += valueLength;
+        },
+
+        estimateJsonTagSize: function(tagName, count, valueLength, valueIsString) {
+            if (!count) {
+                return 0;
+            }
+            const nameLength = this.getUtf8Length(tagName);
+            const overhead = valueIsString ? 6 : 4;
+            return count * (nameLength + overhead) + valueLength;
+        },
+
+        estimateXmlTagSize: function(tagName, count, valueLength) {
+            if (!count) {
+                return 0;
+            }
+            const segments = String(tagName).split('/');
+            let nameLength = 0;
+            for (const segment of segments) {
+                nameLength += this.getUtf8Length(segment);
+            }
+            const overhead = segments.length * 5;
+            return count * (nameLength * 2 + overhead) + valueLength;
+        },
+
+        collectTrackMetaValueStats: function(track) {
+            const stats = {
+                time: {count: 0, valueLength: 0},
+                ele: {count: 0, valueLength: 0},
+                alt: {count: 0, valueLength: 0},
+                attributes: new Map(),
+                extras: new Map(),
+            };
             for (const segment of this.getTrackPolylines(track)) {
                 const latlngs = segment.getFixedLatLngs();
                 for (const latlng of latlngs) {
-                    if (!hasTime && latlng.time !== undefined && latlng.time !== null && latlng.time !== '') {
-                        hasTime = true;
+                    if (latlng.time !== undefined && latlng.time !== null && latlng.time !== '') {
+                        stats.time.count += 1;
+                        stats.time.valueLength += this.getUtf8Length(latlng.time);
                     }
-                    if (!hasEle && latlng.ele !== undefined && latlng.ele !== null && latlng.ele !== '') {
-                        hasEle = true;
+                    if (latlng.ele !== undefined && latlng.ele !== null && latlng.ele !== '') {
+                        stats.ele.count += 1;
+                        stats.ele.valueLength += this.getUtf8Length(latlng.ele);
                     }
-                    if (!hasAlt && latlng.alt !== undefined && latlng.alt !== null) {
-                        hasAlt = true;
+                    if (latlng.alt !== undefined && latlng.alt !== null) {
+                        stats.alt.count += 1;
+                        stats.alt.valueLength += this.getUtf8Length(latlng.alt);
                     }
                     if (latlng.meta && latlng.meta.attributes) {
-                        for (const name of Object.keys(latlng.meta.attributes)) {
-                            attributes.add(name);
+                        for (const [name, value] of Object.entries(latlng.meta.attributes)) {
+                            this.addMetaValueStat(stats.attributes, name, value, true);
                         }
                     }
                     if (latlng.meta && Array.isArray(latlng.meta.extra)) {
-                        const entries = this.collectExtendedMetaEntries(latlng);
-                        for (const entry of entries) {
-                            extraTags.add(entry.name);
-                        }
+                        this.collectExtendedMetaStats(latlng, stats.extras);
                     }
                 }
             }
-            const tags = [];
-            if (hasTime) {
-                tags.push({id: 'time', label: 'time', group: 1});
+            return stats;
+        },
+
+        collectExtendedMetaStats: function(point, extraStats) {
+            if (!point || !point.meta || !Array.isArray(point.meta.extra)) {
+                return;
             }
-            if (hasEle) {
-                tags.push({id: 'ele', label: 'ele', group: 1});
+            if (typeof DOMParser === 'undefined') {
+                return;
             }
-            if (hasAlt) {
-                tags.push({id: 'alt', label: 'alt', group: 1});
+            for (const extraNode of point.meta.extra) {
+                const xml = String(extraNode || '').trim();
+                if (!xml) {
+                    continue;
+                }
+                const doc = new DOMParser().parseFromString(`<root>${xml}</root>`, 'text/xml');
+                if (!doc || !doc.documentElement || doc.documentElement.nodeName === 'parsererror') {
+                    continue;
+                }
+                for (const child of doc.documentElement.children) {
+                    this.collectExtendedMetaStatsFromElement(child, '', extraStats);
+                }
             }
-            Array.from(attributes).sort().forEach((name) => {
-                tags.push({id: `attr:${name}`, label: `@${name}`, group: 2});
-            });
-            Array.from(extraTags).sort().forEach((name) => {
-                tags.push({id: `extra:${name}`, label: `<${name}>`, group: 3});
-            });
-            return tags;
+        },
+
+        collectExtendedMetaStatsFromElement: function(element, prefix, extraStats) {
+            const name = prefix ? `${prefix}/${element.tagName}` : element.tagName;
+            const children = Array.from(element.children);
+            if (!children.length) {
+                const value = (element.textContent || '').trim();
+                if (value) {
+                    this.addMetaValueStat(extraStats, name, value);
+                }
+                return;
+            }
+            if (element.tagName === 'extensions') {
+                for (const child of children) {
+                    this.collectExtendedMetaStatsFromElement(child, name, extraStats);
+                }
+                return;
+            }
+            const value = (element.textContent || '').trim();
+            if (value) {
+                this.addMetaValueStat(extraStats, name, value);
+            }
+            for (const child of children) {
+                this.collectExtendedMetaStatsFromElement(child, name, extraStats);
+            }
         },
 
         getTrackMetaTagStats: function(track) {
-            const entry = this.getTrackJsonEntry(track);
-            if (!entry) {
-                return {baseSize: 0, tags: []};
+            const stats = this.collectTrackMetaValueStats(track);
+            const tags = [];
+            if (stats.time.count) {
+                tags.push({
+                    id: 'time',
+                    label: 'time',
+                    sizeBytes: this.estimateJsonTagSize('t', stats.time.count, stats.time.valueLength, true),
+                });
             }
-            const baseSize = this.getTrackJsonEncodedLength(entry);
-            const tags = this.collectTrackMetaTags(track).map((tag) => {
-                const selection = this.buildMetaTagSelection([tag.id]);
-                const filteredEntry = this.buildTrackEntryWithoutTags(entry, selection);
-                const sizeWithout = this.getTrackJsonEncodedLength(filteredEntry);
-                const sizeBytes = Math.max(0, baseSize - sizeWithout);
-                return {...tag, sizeBytes};
-            });
-            return {baseSize, tags};
+            if (stats.ele.count) {
+                tags.push({
+                    id: 'ele',
+                    label: 'ele',
+                    sizeBytes: this.estimateJsonTagSize('el', stats.ele.count, stats.ele.valueLength, true),
+                });
+            }
+            if (stats.alt.count) {
+                tags.push({
+                    id: 'alt',
+                    label: 'alt',
+                    sizeBytes: this.estimateJsonTagSize('al', stats.alt.count, stats.alt.valueLength, false),
+                });
+            }
+            const attributeTags = Array.from(stats.attributes.entries())
+                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([name, stat]) => ({
+                    id: `attr:${name}`,
+                    label: `@${name}`,
+                    sizeBytes: this.estimateJsonTagSize(name, stat.count, stat.valueLength, true),
+                }));
+            tags.push(...attributeTags);
+            const extraTags = Array.from(stats.extras.entries())
+                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([name, stat]) => ({
+                    id: `extra:${name}`,
+                    label: `<${name}>`,
+                    sizeBytes: this.estimateXmlTagSize(name, stat.count, stat.valueLength),
+                }));
+            tags.push(...extraTags);
+            return {baseSize: 0, tags};
         },
 
         getTrackMetaCleanupSelection: function(track) {
