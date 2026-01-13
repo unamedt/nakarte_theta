@@ -23,6 +23,7 @@ import {notify, query} from '~/lib/notifications';
 import {fetch} from '~/lib/xhr-promise';
 import config from '~/config';
 import md5 from 'blueimp-md5';
+import tzLookup from 'tz-lookup';
 import {wrapLatLngToTarget, wrapLatLngBoundsToTarget} from '~/lib/leaflet.fixes/fixWorldCopyJump';
 import {createZipFile} from '~/lib/zip-writer';
 import {splitLinesAt180Meridian} from "./lib/meridian180";
@@ -1020,7 +1021,7 @@ L.Control.TrackList = L.Control.extend({
                 `;
             }
             const {points, point, index, distanceFromStart} = nearestInfo;
-            const timeText = this.formatPointTime(point);
+            const timeText = this.formatPointTime(point, track);
             const elevationText = this.formatPointElevation(point);
             const speedText = this.formatPointSpeed(points, index);
             return `
@@ -1070,7 +1071,7 @@ L.Control.TrackList = L.Control.extend({
             return distance;
         },
 
-        formatPointTime: function(point) {
+        formatPointTime: function(point, track) {
             if (!point || !point.time) {
                 return 'n/a';
             }
@@ -1078,15 +1079,114 @@ L.Control.TrackList = L.Control.extend({
             if (Number.isNaN(parsed)) {
                 return String(point.time);
             }
+            const timeZone = track ? this.getTrackTimeZone(track) : null;
+            if (timeZone && typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+                const formatter = this.getTimeZoneFormatter(timeZone);
+                if (formatter && formatter.formatToParts) {
+                    const parts = formatter.formatToParts(new Date(parsed));
+                    const partValues = {};
+                    for (const part of parts) {
+                        if (part.type !== 'literal') {
+                            partValues[part.type] = part.value;
+                        }
+                    }
+                    if (
+                        partValues.hour &&
+                        partValues.minute &&
+                        partValues.second &&
+                        partValues.day &&
+                        partValues.month &&
+                        partValues.year
+                    ) {
+                        return this.formatDateParts(
+                            partValues.hour,
+                            partValues.minute,
+                            partValues.second,
+                            partValues.day,
+                            partValues.month,
+                            partValues.year
+                        );
+                    }
+                }
+            }
             const date = new Date(parsed);
-            const pad2 = (value) => String(value).padStart(2, '0');
-            const hours = pad2(date.getHours());
-            const minutes = pad2(date.getMinutes());
-            const seconds = pad2(date.getSeconds());
-            const day = pad2(date.getDate());
-            const month = pad2(date.getMonth() + 1);
-            const year = date.getFullYear();
+            return this.formatDateParts(
+                this.pad2(date.getHours()),
+                this.pad2(date.getMinutes()),
+                this.pad2(date.getSeconds()),
+                this.pad2(date.getDate()),
+                this.pad2(date.getMonth() + 1),
+                String(date.getFullYear())
+            );
+        },
+
+        getTimeZoneFormatter: function(timeZone) {
+            if (!this._timeZoneFormatters) {
+                this._timeZoneFormatters = new Map();
+            }
+            if (!this._timeZoneFormatters.has(timeZone)) {
+                this._timeZoneFormatters.set(
+                    timeZone,
+                    new Intl.DateTimeFormat('en-GB', {
+                        timeZone,
+                        hour12: false,
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                    })
+                );
+            }
+            return this._timeZoneFormatters.get(timeZone);
+        },
+
+        formatDateParts: function(hours, minutes, seconds, day, month, year) {
             return `${hours}:${minutes}:${seconds} ${day}.${month}.${year}`;
+        },
+
+        pad2: function(value) {
+            return String(value).padStart(2, '0');
+        },
+
+        getTrackTimeZone: function(track) {
+            const firstPoint = this.getTrackFirstPoint(track);
+            if (!firstPoint) {
+                return null;
+            }
+            if (
+                track._timeZone &&
+                track._timeZoneSource &&
+                track._timeZoneSource.lat === firstPoint.lat &&
+                track._timeZoneSource.lng === firstPoint.lng
+            ) {
+                return track._timeZone;
+            }
+            let timeZone;
+            try {
+                timeZone = tzLookup(firstPoint.lat, firstPoint.lng);
+            } catch (e) {
+                return null;
+            }
+            track._timeZone = timeZone;
+            track._timeZoneSource = {lat: firstPoint.lat, lng: firstPoint.lng};
+            return timeZone;
+        },
+
+        getTrackFirstPoint: function(track) {
+            const segments = this.getTrackPolylines(track);
+            for (const segment of segments) {
+                const latlngs = segment.getFixedLatLngs();
+                if (latlngs.length) {
+                    return latlngs[0];
+                }
+            }
+            const markers = this.getTrackPoints(track);
+            if (markers.length) {
+                return markers[0].latlng;
+            }
+            return null;
         },
 
         formatPointElevation: function(point) {

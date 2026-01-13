@@ -92,6 +92,7 @@
     "regenerator-runtime": "^0.13.11",
     "tiny-inflate": "^1.0.2",
     "twkb": "^0.2.2",
+    "tz-lookup": "^6.1.25",
     "utf8": "^3.0.0"
   }
 }
