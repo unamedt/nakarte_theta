@@ -29,18 +29,62 @@ function parseTrack(rawTrack) {
             return {valid: false};
         }
         for (let rawPoint of rawSegment) {
-            if (!rawPoint || rawPoint.length !== 2) {
+            const res = parseTrackPoint(rawPoint);
+            if (!res.valid) {
                 return {valid: false};
             }
-            let [lat, lng] = rawPoint.map(Number);
-            if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90) {
-                return {valid: false};
-            }
-            segment.push({lat, lng});
+            segment.push(res.point);
         }
         track.push(segment);
     }
     return {valid: true, track};
+}
+
+function parseTrackPoint(rawPoint) {
+    let lat;
+    let lng;
+    let point = {};
+    if (Array.isArray(rawPoint)) {
+        if (rawPoint.length < 2) {
+            return {valid: false};
+        }
+        lat = Number(rawPoint[0]);
+        lng = Number(rawPoint[1]);
+    } else if (rawPoint && typeof rawPoint === 'object') {
+        lat = Number(rawPoint.lt ?? rawPoint.lat);
+        lng = Number(rawPoint.ln ?? rawPoint.lng);
+        if (rawPoint.al !== undefined) {
+            const alt = Number(rawPoint.al);
+            if (!isNaN(alt)) {
+                point.alt = alt;
+            }
+        }
+        if (rawPoint.el !== undefined) {
+            point.ele = String(rawPoint.el);
+        }
+        if (rawPoint.t !== undefined) {
+            point.time = String(rawPoint.t);
+        }
+        if (rawPoint.m && typeof rawPoint.m === 'object') {
+            const meta = {};
+            if (rawPoint.m.a && typeof rawPoint.m.a === 'object') {
+                meta.attributes = rawPoint.m.a;
+            }
+            if (Array.isArray(rawPoint.m.x)) {
+                meta.extra = rawPoint.m.x;
+            }
+            if (Object.keys(meta).length) {
+                point.meta = meta;
+            }
+        }
+    } else {
+        return {valid: false};
+    }
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return {valid: false};
+    }
+    point = {lat, lng, ...point};
+    return {valid: true, point};
 }
 
 async function loadTracksFromJson(value) { // eslint-disable-line complexity

@@ -24,12 +24,14 @@ import {fetch} from '~/lib/xhr-promise';
 import config from '~/config';
 import md5 from 'blueimp-md5';
 import escapeHtml from 'escape-html';
+import utf8 from 'utf8';
 import tzLookup from 'tz-lookup';
 import {wrapLatLngToTarget, wrapLatLngBoundsToTarget} from '~/lib/leaflet.fixes/fixWorldCopyJump';
 import {createZipFile} from '~/lib/zip-writer';
 import {splitLinesAt180Meridian} from "./lib/meridian180";
 import {ElevationProvider} from '~/lib/elevations';
 import {parseNktkSequence} from './lib/parsers/nktk';
+import * as urlSafeBase64 from './lib/parsers/urlSafeBase64';
 import * as coordFormats from '~/lib/leaflet.control.coordinates/formats';
 import {polygonArea} from '~/lib/polygon-area';
 import {polylineHasSelfIntersections} from '~/lib/polyline-selfintersects';
@@ -678,6 +680,108 @@ L.Control.TrackList = L.Control.extend({
             return tracks.map((track) => this.trackToString(track)).join('/');
         },
 
+        serializeTracksForHash: function(tracks) {
+            if (!tracks.length) {
+                return null;
+            }
+            if (!this.tracksHavePointMeta(tracks)) {
+                return {paramName: 'nktl', payload: this.serializeTracks(tracks)};
+            }
+            const jsonPayload = this.serializeTracksToJson(tracks);
+            if (!jsonPayload.length) {
+                return {paramName: 'nktl', payload: this.serializeTracks(tracks)};
+            }
+            let jsonString = JSON.stringify(jsonPayload);
+            jsonString = utf8.encode(jsonString);
+            return {paramName: 'nktj', payload: urlSafeBase64.encode(jsonString)};
+        },
+
+        tracksHavePointMeta: function(tracks) {
+            for (const track of tracks) {
+                if (this.trackHasPointMeta(track)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        trackHasPointMeta: function(track) {
+            const segments = this.getTrackPolylines(track);
+            for (const segment of segments) {
+                const latlngs = segment.getFixedLatLngs();
+                for (const latlng of latlngs) {
+                    const hasAlt = latlng.alt !== undefined && latlng.alt !== null;
+                    const hasMeta =
+                        latlng.meta &&
+                        ((latlng.meta.attributes && Object.keys(latlng.meta.attributes).length) ||
+                            (Array.isArray(latlng.meta.extra) && latlng.meta.extra.length));
+                    if (latlng.time || latlng.ele || hasAlt || hasMeta) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        },
+
+        serializeTracksToJson: function(tracks) {
+            const payload = [];
+            for (const track of tracks) {
+                const entry = {n: track.name()};
+                const segments = [];
+                for (const segment of this.getTrackPolylines(track)) {
+                    const latlngs = segment.getFixedLatLngs();
+                    if (!latlngs.length) {
+                        continue;
+                    }
+                    segments.push(latlngs.map(this.serializeTrackPointForJson.bind(this)));
+                }
+                if (segments.length) {
+                    entry.t = segments;
+                }
+                const points = this.getTrackPoints(track).map((point) => ({
+                    n: point.label,
+                    lt: point.latlng.lat,
+                    ln: point.latlng.lng,
+                }));
+                if (points.length) {
+                    entry.p = points;
+                }
+                entry.c = track.color();
+                entry.v = track.visible();
+                entry.m = track.measureTicksShown();
+                if (entry.t || entry.p) {
+                    payload.push(entry);
+                }
+            }
+            return payload;
+        },
+
+        serializeTrackPointForJson: function(latlng) {
+            const point = {lt: latlng.lat, ln: latlng.lng};
+            if (latlng.alt !== undefined && latlng.alt !== null) {
+                point.al = latlng.alt;
+            }
+            if (latlng.ele !== undefined && latlng.ele !== null && latlng.ele !== '') {
+                point.el = latlng.ele;
+            }
+            if (latlng.time !== undefined && latlng.time !== null && latlng.time !== '') {
+                point.t = latlng.time;
+            }
+            if (latlng.meta) {
+                const meta = {};
+                if (latlng.meta.attributes && Object.keys(latlng.meta.attributes).length) {
+                    meta.a = latlng.meta.attributes;
+                }
+                if (Array.isArray(latlng.meta.extra) && latlng.meta.extra.length) {
+                    meta.x = latlng.meta.extra;
+                }
+                if (Object.keys(meta).length) {
+                    point.m = meta;
+                }
+            }
+            return point;
+        },
+
         copyTracksLinkToClipboard: function(tracks, mouseEvent, allowWithoutTracks = false) {
             if (!tracks.length) {
                 if (allowWithoutTracks) {
@@ -688,14 +792,23 @@ L.Control.TrackList = L.Control.extend({
                 notify('No tracks to copy');
                 return;
             }
-            let serialized = this.serializeTracks(tracks);
-            const hashDigest = md5(serialized, null, true);
+            const serialized = this.serializeTracksForHash(tracks);
+            if (!serialized) {
+                notify('No tracks to copy');
+                return;
+            }
+            if (serialized.paramName === 'nktj') {
+                const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktj: serialized.payload});
+                copyToClipboard(url, mouseEvent);
+                return;
+            }
+            const hashDigest = md5(serialized.payload, null, true);
             const key = btoa(hashDigest).replace(/\//ug, '_').replace(/\+/ug, '-').replace(/=/ug, '');
             const url = getLinkToShare(this.options.keysToExcludeOnCopyLink, {nktl: key});
             copyToClipboard(url, mouseEvent);
             fetch(`${config.tracksStorageServer}/track/${key}`, {
                 method: 'POST',
-                data: serialized,
+                data: serialized.payload,
                 withCredentials: true
             }).then(
                 null, (e) => {
