@@ -1056,7 +1056,19 @@ L.Control.TrackList = L.Control.extend({
             if (!point || !point.time) {
                 return 'n/a';
             }
-            return String(point.time);
+            const parsed = Date.parse(point.time);
+            if (Number.isNaN(parsed)) {
+                return String(point.time);
+            }
+            const date = new Date(parsed);
+            const pad2 = (value) => String(value).padStart(2, '0');
+            const hours = pad2(date.getHours());
+            const minutes = pad2(date.getMinutes());
+            const seconds = pad2(date.getSeconds());
+            const day = pad2(date.getDate());
+            const month = pad2(date.getMonth() + 1);
+            const year = date.getFullYear();
+            return `${hours}:${minutes}:${seconds} ${day}.${month}.${year}`;
         },
 
         formatPointElevation: function(point) {
