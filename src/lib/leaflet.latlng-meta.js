@@ -81,4 +81,4 @@ function wrapLatLngWithMeta(point) {
     return copyLatLngMeta(point, wrapped);
 }
 
-export {cloneLatLngMeta, copyLatLngMeta, toLatLngWithMeta, cloneLatLngWithMeta, wrapLatLngWithMeta};
+export {copyLatLngMeta, toLatLngWithMeta, cloneLatLngWithMeta, wrapLatLngWithMeta};
